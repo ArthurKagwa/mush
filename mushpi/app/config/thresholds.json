@@ -1,0 +1,7 @@
+{
+  "Oyster": {
+    "Incubation": {"temp_min": 24.0, "temp_max": 28.0, "rh_min": 70.0, "co2_max": 5000, "light": {"mode": "off"}, "expected_days": 14},
+    "Pinning":    {"temp_min": 18.0, "temp_max": 22.0, "rh_min": 90.0, "co2_max": 1000, "light": {"mode": "cycle","on_min": 960,"off_min": 480}, "expected_days": 5},
+    "Fruiting":   {"temp_min": 15.0, "temp_max": 20.0, "rh_min": 85.0, "co2_max": 800,  "light": {"mode": "cycle","on_min": 900,"off_min": 540}, "expected_days": 0}
+  }
+}
