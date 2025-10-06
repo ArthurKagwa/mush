@@ -6,10 +6,18 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/opt/mushpi/app
-ExecStart=/opt/mushpi/.venv/bin/python -u /opt/mushpi/app/main.py
+WorkingDirectory=${MUSHPI_APP_DIR:-/opt/mushpi/app}
+ExecStart=${MUSHPI_VENV_PATH:-/opt/mushpi/.venv}/bin/python -u ${MUSHPI_APP_DIR:-/opt/mushpi/app}/main.py
+EnvironmentFile=-/opt/mushpi/.env
+EnvironmentFile=-/opt/mushpi/app/.env
+Environment=PYTHONPATH=${MUSHPI_APP_DIR:-/opt/mushpi/app}
+Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
 RestartSec=3
+TimeoutStartSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGHUP=no
 
 [Install]
 WantedBy=multi-user.target

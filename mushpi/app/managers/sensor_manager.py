@@ -18,6 +18,7 @@ from ..sensors.scd41 import SCD41Sensor
 from ..sensors.dht22 import DHT22Sensor
 from ..sensors.light_sensor import LightSensor
 from ..sensors.base import SCD41Error, DHT22Error, LightSensorError
+from ..core.config import config
 
 # Logging Setup
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class SensorManager:
         # Monitoring state
         self.monitoring = False
         self.monitor_thread = None
-        self.monitor_interval = 30.0  # 30 seconds between readings
+        self.monitor_interval = config.timing.monitor_interval
         
         # Last readings cache
         self.last_reading = None

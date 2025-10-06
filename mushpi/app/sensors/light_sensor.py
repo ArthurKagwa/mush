@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 from .base import BaseSensor, LightSensorError
+from ..core.config import config
 
 try:
     import board
@@ -22,9 +23,6 @@ except ImportError:
     logging.warning("GPIO libraries not available - running in simulation mode")
     GPIO_AVAILABLE = False
 
-# Hardware Configuration Constants
-ADS1115_ADDRESS = 0x48
-
 # Logging Setup
 logger = logging.getLogger(__name__)
 
@@ -32,13 +30,13 @@ logger = logging.getLogger(__name__)
 class LightSensor(BaseSensor):
     """ADS1115 + Photoresistor Light Level Sensor (I2C)"""
     
-    def __init__(self, i2c_address: int = ADS1115_ADDRESS, channel: int = 0):
+    def __init__(self, i2c_address: Optional[int] = None, channel: Optional[int] = None):
         super().__init__("ADS1115_Light")
-        self.i2c_address = i2c_address  
-        self.channel = channel
+        self.i2c_address = i2c_address or config.i2c.ads1115_address
+        self.channel = channel or config.i2c.light_sensor_channel
         self.ads = None
         self.analog_in = None
-        self.reading_interval = 1.0  # 1 second minimum
+        self.reading_interval = config.timing.light_interval
         self._initialize_sensor()
         
     def _initialize_sensor(self) -> bool:
@@ -98,8 +96,8 @@ class LightSensor(BaseSensor):
         Photoresistor in voltage divider: Vout = Vcc * R_photo / (R_fixed + R_photo)
         Higher light = lower resistance = higher voltage
         """
-        vcc = 3.3  # Supply voltage
-        r_fixed = 10000  # 10k fixed resistor
+        vcc = config.calibration.light_vcc
+        r_fixed = config.calibration.light_fixed_resistor
         
         if voltage <= 0.01:  # Avoid division by zero
             return 0.0
@@ -109,13 +107,16 @@ class LightSensor(BaseSensor):
         
         # Convert to light level (inverse relationship)
         # Higher resistance = darker = lower light level
-        if r_photo > 100000:  # Very dark
+        max_resistance = config.calibration.light_max_resistance
+        min_resistance = config.calibration.light_min_resistance
+        
+        if r_photo > max_resistance:  # Very dark
             light_level = 0
-        elif r_photo < 1000:  # Very bright
+        elif r_photo < min_resistance:  # Very bright
             light_level = 1000
         else:
             # Logarithmic scale mapping
-            light_level = 1000 * (1 - math.log10(r_photo / 1000) / math.log10(100))
+            light_level = 1000 * (1 - math.log10(r_photo / min_resistance) / math.log10(max_resistance / min_resistance))
             
         return max(0, min(1000, light_level))
         

@@ -17,19 +17,15 @@ from ..sensors.base import SensorError, SCD41Error, DHT22Error, LightSensorError
 from ..sensors.scd41 import SCD41Sensor
 from ..sensors.dht22 import DHT22Sensor
 from ..sensors.light_sensor import LightSensor
+from .config import config
 
-# Hardware Configuration Constants (maintained for compatibility)
-DHT22_PIN = 4
-RELAY_PINS = {
-    'humidifier': 17,
-    'exhaust_fan': 27, 
-    'circulation_fan': 22,
-    'grow_light': 23
-}
+# Hardware Configuration Constants (maintained for compatibility - now from config)
+DHT22_PIN = config.gpio.dht22_pin
+RELAY_PINS = config.gpio.get_relay_pins()
 
-# I2C Addresses
-SCD41_ADDRESS = 0x62
-ADS1115_ADDRESS = 0x48
+# I2C Addresses (maintained for compatibility - now from config)
+SCD41_ADDRESS = config.i2c.scd41_address
+ADS1115_ADDRESS = config.i2c.ads1115_address
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO)

@@ -9,6 +9,7 @@ import logging
 from typing import Optional, Tuple
 
 from .base import BaseSensor, DHT22Error
+from ..core.config import config
 
 try:
     import board
@@ -18,9 +19,6 @@ except ImportError:
     logging.warning("GPIO libraries not available - running in simulation mode")
     GPIO_AVAILABLE = False
 
-# Hardware Configuration Constants
-DHT22_PIN = 4
-
 # Logging Setup
 logger = logging.getLogger(__name__)
 
@@ -28,10 +26,10 @@ logger = logging.getLogger(__name__)
 class DHT22Sensor(BaseSensor):
     """DHT22 Temperature and Humidity Sensor (GPIO) - Backup sensor"""
     
-    def __init__(self, pin: int = DHT22_PIN):
+    def __init__(self, pin: Optional[int] = None):
         super().__init__("DHT22")
-        self.pin = pin
-        self.reading_interval = 2.0  # DHT22 minimum interval
+        self.pin = pin or config.gpio.dht22_pin
+        self.reading_interval = config.timing.dht22_interval
         self._initialize_sensor()
         
     def _initialize_sensor(self) -> bool:

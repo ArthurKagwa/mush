@@ -13,9 +13,7 @@ from typing import Optional, Dict, List
 
 from ..models.dataclasses import SensorReading, Threshold, ThresholdEvent
 from ..database.manager import DatabaseManager
-
-# File Paths
-THRESHOLDS_JSON = Path("config/thresholds.json")
+from ..core.config import config
 
 # Logging Setup
 logger = logging.getLogger(__name__)
@@ -24,8 +22,8 @@ logger = logging.getLogger(__name__)
 class ThresholdManager:
     """Manages environmental thresholds with JSON persistence"""
     
-    def __init__(self, json_path: Path = THRESHOLDS_JSON, db_manager: DatabaseManager = None):
-        self.json_path = json_path
+    def __init__(self, json_path: Optional[Path] = None, db_manager: DatabaseManager = None):
+        self.json_path = json_path or config.thresholds_path
         self.db_manager = db_manager or DatabaseManager()
         self.json_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_default_thresholds()

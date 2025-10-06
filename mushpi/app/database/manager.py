@@ -10,9 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..models.dataclasses import SensorReading, ThresholdEvent
-
-# File Paths
-DB_PATH = Path("data/sensors.db")
+from ..core.config import config
 
 # Logging Setup
 logger = logging.getLogger(__name__)
@@ -21,8 +19,8 @@ logger = logging.getLogger(__name__)
 class DatabaseManager:
     """Handles all database operations for sensor data"""
     
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[Path] = None):
+        self.db_path = db_path or config.database.path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_database()
         

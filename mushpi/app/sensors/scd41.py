@@ -9,6 +9,7 @@ import logging
 from typing import Optional, Tuple
 
 from .base import BaseSensor, SCD41Error
+from ..core.config import config
 
 try:
     import board
@@ -19,9 +20,6 @@ except ImportError:
     logging.warning("GPIO libraries not available - running in simulation mode")
     GPIO_AVAILABLE = False
 
-# Hardware Configuration Constants
-SCD41_ADDRESS = 0x62
-
 # Logging Setup
 logger = logging.getLogger(__name__)
 
@@ -29,10 +27,10 @@ logger = logging.getLogger(__name__)
 class SCD41Sensor(BaseSensor):
     """SCD41 CO2, Temperature, and Humidity Sensor (I2C)"""
     
-    def __init__(self, i2c_address: int = SCD41_ADDRESS):
+    def __init__(self, i2c_address: Optional[int] = None):
         super().__init__("SCD41")
-        self.i2c_address = i2c_address
-        self.reading_interval = 5.0  # SCD41 minimum interval
+        self.i2c_address = i2c_address or config.i2c.scd41_address
+        self.reading_interval = config.timing.scd41_interval
         self._initialize_sensor()
         
     def _initialize_sensor(self) -> bool:
