@@ -100,6 +100,9 @@ class ControlConfig:
     temp_hysteresis: float
     humidity_hysteresis: float
     co2_hysteresis: float
+    light_on_threshold: float
+    light_off_threshold: float
+    light_verification_delay: float
 
 
 @dataclass
@@ -241,7 +244,10 @@ class ConfigurationManager:
             relay_active_high=self._get_env_var('MUSHPI_RELAY_ACTIVE_HIGH', True, bool),
             temp_hysteresis=self._get_env_var('MUSHPI_TEMP_HYSTERESIS', 1.0, float),
             humidity_hysteresis=self._get_env_var('MUSHPI_HUMIDITY_HYSTERESIS', 3.0, float),
-            co2_hysteresis=self._get_env_var('MUSHPI_CO2_HYSTERESIS', 100.0, float)
+            co2_hysteresis=self._get_env_var('MUSHPI_CO2_HYSTERESIS', 100.0, float),
+            light_on_threshold=self._get_env_var('MUSHPI_LIGHT_ON_THRESHOLD', 200.0, float),
+            light_off_threshold=self._get_env_var('MUSHPI_LIGHT_OFF_THRESHOLD', 50.0, float),
+            light_verification_delay=self._get_env_var('MUSHPI_LIGHT_VERIFICATION_DELAY', 30.0, float)
         )
         
         # Bluetooth

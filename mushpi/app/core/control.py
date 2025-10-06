@@ -222,6 +222,69 @@ class LightSchedule:
         return False, f"Schedule: Unknown mode '{self.mode}'"
 
 
+class LightVerification:
+    """Monitor and verify light functionality using photoresistor feedback"""
+    
+    def __init__(self, on_threshold: float = 200.0, off_threshold: float = 50.0, 
+                 verification_delay: float = 30.0):
+        self.on_threshold = on_threshold    # Light level when light should be detected as ON
+        self.off_threshold = off_threshold  # Light level when light should be detected as OFF
+        self.verification_delay = verification_delay  # Seconds to wait before verifying
+        self.last_state_change: Optional[datetime] = None
+        self.last_verification_alert: Optional[datetime] = None
+        self.verification_failures = 0
+        
+    def verify_light_operation(self, expected_state: RelayState, actual_light_level: float, 
+                             current_time: datetime) -> Tuple[bool, str]:
+        """Verify that light operation matches expected state
+        
+        Args:
+            expected_state: Whether light should be ON or OFF
+            actual_light_level: Current light sensor reading (0-1000)
+            current_time: Current timestamp
+            
+        Returns:
+            (is_correct, status_message)
+        """
+        # Don't verify immediately after state change - allow time for light to stabilize
+        if (self.last_state_change and 
+            (current_time - self.last_state_change).total_seconds() < self.verification_delay):
+            return True, f"Verification pending (waiting {self.verification_delay}s)"
+            
+        # Determine if light reading matches expected state
+        if expected_state == RelayState.ON:
+            is_correct = actual_light_level >= self.on_threshold
+            expected_desc = f"bright (≥{self.on_threshold})"
+        else:
+            is_correct = actual_light_level <= self.off_threshold  
+            expected_desc = f"dark (≤{self.off_threshold})"
+            
+        # Generate status message
+        if is_correct:
+            if self.verification_failures > 0:
+                logger.info(f"Light verification recovered after {self.verification_failures} failures")
+                self.verification_failures = 0
+            return True, f"Light verified: {actual_light_level:.0f} units ({expected_desc})"
+        else:
+            self.verification_failures += 1
+            
+            # Rate limit alerts to avoid spam
+            should_alert = (self.last_verification_alert is None or 
+                          (current_time - self.last_verification_alert).total_seconds() > 300)  # 5 min
+            
+            if should_alert:
+                self.last_verification_alert = current_time
+                logger.warning(f"Light verification FAILED: expected {expected_desc}, "
+                             f"got {actual_light_level:.0f} units (failure #{self.verification_failures})")
+                
+            return False, f"Light mismatch: {actual_light_level:.0f} units (expected {expected_desc})"
+            
+    def record_state_change(self, new_state: RelayState, timestamp: datetime) -> None:
+        """Record when light state changes to reset verification timer"""
+        self.last_state_change = timestamp
+        logger.debug(f"Light verification: state changed to {new_state.name} at {timestamp}")
+
+
 class RelayManager:
     """Manage GPIO relay operations with simulation support"""
     
@@ -323,6 +386,11 @@ class ControlSystem:
         self.duty_trackers: Dict[str, DutyCycleTracker] = {}
         self.condensation_guard = CondensationGuard()
         self.light_schedule = LightSchedule()
+        self.light_verification = LightVerification(
+            on_threshold=config.control.light_on_threshold,
+            off_threshold=config.control.light_off_threshold,
+            verification_delay=config.control.light_verification_delay
+        )
         
         # Current thresholds (will be updated by external systems)
         self.current_thresholds: Dict[str, Threshold] = {}
@@ -508,17 +576,38 @@ class ControlSystem:
         return actions
         
     def _process_light_control(self, reading: SensorReading, current_time: datetime) -> Dict[str, RelayAction]:
-        """Process light schedule control"""
+        """Process light schedule control with photoresistor verification"""
         actions = {}
         
         should_be_on, reason = self.light_schedule.should_light_be_on(current_time)
         desired_state = RelayState.ON if should_be_on else RelayState.OFF
         
         current_state = self.relay_manager.get_relay_state('grow_light')
+        
+        # Control light based on schedule
         if current_state != desired_state:
             actions['light'] = self._set_relay_with_tracking(
                 'grow_light', desired_state, reason, current_time
             )
+            # Record state change for verification timing
+            self.light_verification.record_state_change(desired_state, current_time)
+            
+        # Verify light operation using photoresistor
+        if reading.light_level is not None:
+            current_relay_state = self.relay_manager.get_relay_state('grow_light')
+            if current_relay_state is not None:
+                is_correct, verification_msg = self.light_verification.verify_light_operation(
+                    current_relay_state, reading.light_level, current_time
+                )
+                
+                # Log verification results
+                if is_correct:
+                    logger.debug(f"Light verification: {verification_msg}")
+                else:
+                    logger.warning(f"Light verification: {verification_msg}")
+                    # Could trigger additional actions here (alerts, retry logic, etc.)
+                    
+        return actions
             
         return actions
         
@@ -592,6 +681,12 @@ class ControlSystem:
                 'on_minutes': self.light_schedule.on_minutes,
                 'off_minutes': self.light_schedule.off_minutes
             },
+            'light_verification': {
+                'on_threshold': self.light_verification.on_threshold,
+                'off_threshold': self.light_verification.off_threshold,
+                'failures': self.light_verification.verification_failures,
+                'last_alert': self.light_verification.last_verification_alert
+            },
             'controllers_active': len(self.controllers),
             'recent_actions': len([a for a in self.action_history 
                                  if a.timestamp > current_time - timedelta(hours=1)])
@@ -606,5 +701,5 @@ class ControlSystem:
 # Export main classes for external use
 __all__ = [
     'ControlSystem', 'RelayState', 'ControlMode', 'RelayAction',
-    'HysteresisController', 'CondensationGuard', 'LightSchedule'
+    'HysteresisController', 'CondensationGuard', 'LightSchedule', 'LightVerification'
 ]

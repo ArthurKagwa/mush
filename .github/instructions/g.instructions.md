@@ -13,5 +13,7 @@ applyTo: '**'
 - use environment variables for configuration
 - ensure proper error handling and logging
 - Use .env for all environment variables
+- update baseline after each change
+- maintain latest first in Baseline
 
 - ASK BEFORE PERFORMING ANY TASK!!

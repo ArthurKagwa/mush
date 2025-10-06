@@ -66,13 +66,35 @@ Threshold: 85% RH minimum
 
 ### 3. **LIGHT (Grow Light)**
 - **GPIO Pin**: `MUSHPI_RELAY_LIGHT` (default: 22)
-- **Control Mode**: Schedule-based (not sensor-based)
+- **Control Mode**: Schedule-based with photoresistor verification
 - **Modes**:
   - **OFF**: Light always off
   - **ON**: Light always on
   - **CYCLE**: Timed on/off cycles
 - **No Hysteresis**: Digital schedule control
 - **No Duty Cycle Limit**: Schedule determines usage
+- **Verification**: Photoresistor feedback confirms operation
+
+#### Light Verification:
+The system uses a photoresistor to verify that the grow light is working correctly:
+
+**Verification Thresholds**:
+```bash
+MUSHPI_LIGHT_ON_THRESHOLD=200.0    # Light level when light should be detected as ON
+MUSHPI_LIGHT_OFF_THRESHOLD=50.0    # Light level when light should be detected as OFF  
+MUSHPI_LIGHT_VERIFICATION_DELAY=30.0  # Seconds to wait after state change
+```
+
+**Verification Logic**:
+- When light relay is ON → photoresistor should read ≥ 200 units
+- When light relay is OFF → photoresistor should read ≤ 50 units
+- Verification occurs 30 seconds after any state change (allows stabilization)
+- Failed verifications are logged and tracked for monitoring
+
+**Benefits**:
+- Detects burned-out bulbs or failed relays
+- Confirms light fixture is properly connected
+- Provides feedback for maintenance needs
 
 #### Schedule Examples:
 ```
@@ -153,7 +175,28 @@ Prevents rapid state changes by enforcing minimum time between relay operations.
 
 **Minimum Duration**: 30 seconds between state changes per relay
 
-### 5. **Emergency Stop**
+### 5. **Light Verification**
+Monitors grow light operation using photoresistor feedback to detect failures.
+
+**Verification Process**:
+- Compares expected light state with actual photoresistor readings
+- 30-second delay after state changes (configurable)
+- Rate-limited failure alerts (every 5 minutes maximum)
+
+**Configuration**:
+```bash
+MUSHPI_LIGHT_ON_THRESHOLD=200.0     # Brightness threshold for "light ON"
+MUSHPI_LIGHT_OFF_THRESHOLD=50.0     # Darkness threshold for "light OFF"  
+MUSHPI_LIGHT_VERIFICATION_DELAY=30.0 # Wait time after state changes
+```
+
+**Failure Detection**:
+- Light scheduled ON but photoresistor reads < 200 units
+- Light scheduled OFF but photoresistor reads > 50 units
+- Failures logged with timestamps and failure counts
+- Alerts rate-limited to prevent spam
+
+### 6. **Emergency Stop**
 Provides immediate shutdown capability for all relays.
 
 **Triggers**:
@@ -196,6 +239,13 @@ MUSHPI_RELAY_FAN=17      # Fan/Exhaust control
 MUSHPI_RELAY_MIST=27     # Humidifier/Mist control  
 MUSHPI_RELAY_LIGHT=22    # Grow light control
 MUSHPI_RELAY_HEATER=23   # Heater control (optional)
+```
+
+**Light Verification Parameters**:
+```bash
+MUSHPI_LIGHT_ON_THRESHOLD=200.0     # Photoresistor reading when light ON
+MUSHPI_LIGHT_OFF_THRESHOLD=50.0     # Photoresistor reading when light OFF
+MUSHPI_LIGHT_VERIFICATION_DELAY=30.0 # Delay before verification (seconds)
 ```
 
 ### Wiring Diagram
