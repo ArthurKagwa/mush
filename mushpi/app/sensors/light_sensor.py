@@ -48,7 +48,8 @@ class LightSensor(BaseSensor):
         try:
             i2c = busio.I2C(board.SCL, board.SDA)
             self.ads = ADS.ADS1115(i2c, address=self.i2c_address)
-            self.analog_in = AnalogIn(self.ads, getattr(ADS, f'P{self.channel}'))
+            # Use channel number directly (0-3 for A0-A3), not ADS.P0 attribute
+            self.analog_in = AnalogIn(self.ads, self.channel)
             logger.info(f"ADS1115 light sensor initialized on channel {self.channel}")
             return True
             

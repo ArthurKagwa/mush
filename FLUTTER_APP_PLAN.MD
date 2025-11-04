@@ -7,10 +7,14 @@
 **Target System:** MushPi Raspberry Pi mushroom cultivation controller  
 **Communication:** BLE GATT protocol  
 **Version:** 1.0.0  
-**Created:** October 6, 2025
+**Created:** October 6, 2025  
+**Last Updated:** November 4, 2025
 
 ### Mission Statement
 Create a beautiful, intuitive Flutter mobile application that provides seamless wireless control and monitoring of the MushPi mushroom cultivation system through BLE GATT communication.
+
+### Implementation Status
+This plan has been updated to reflect the **actual implemented MushPi BLE GATT service** including real UUIDs, data formats, and characteristic behaviors from the production codebase.
 
 ---
 
@@ -30,90 +34,88 @@ The MushPi Flutter app will serve as the primary user interface for monitoring a
 
 ## Technical Architecture
 
+### Design Principles
+1. **Single Source of Truth**: One centralized state manager for all app data
+2. **Simple Persistence**: All data automatically persisted to local database
+3. **Linear User Flow**: Clear, simple path from connection to monitoring
+4. **Offline-First**: App works without constant BLE connection
+
 ### Technology Stack
 - **Framework**: Flutter 3.x with Dart 3.x
-- **State Management**: Built-in Flutter solutions (ChangeNotifier, ValueNotifier)
+- **State Management**: `Riverpod` (single source of truth, simple, testable)
 - **BLE Communication**: `flutter_blue_plus` package
 - **Navigation**: `go_router` for declarative routing
-- **Data Persistence**: `sqflite` for local storage
+- **Data Persistence**: `sqflite` + `drift` for type-safe local storage
 - **Charts/Graphs**: `fl_chart` for data visualization
 - **Theme/UI**: Material Design 3 with custom theming
+- **Code Generation**: `freezed` for immutable data models
 
-### Project Structure
+### Simplified Project Structure
 ```
 lib/
-├── main.dart
+├── main.dart                        # App entry + Riverpod setup
+├── app.dart                         # MaterialApp + router config
+│
 ├── core/
-│   ├── config/
-│   │   ├── app_config.dart
-│   │   ├── ble_config.dart
-│   │   └── theme_config.dart
 │   ├── constants/
-│   │   ├── app_constants.dart
-│   │   ├── ble_uuids.dart
-│   │   └── colors.dart
-│   ├── utils/
-│   │   ├── logger.dart
-│   │   ├── validators.dart
-│   │   └── formatters.dart
-│   └── extensions/
-│       ├── datetime_extensions.dart
-│       └── string_extensions.dart
+│   │   ├── ble_constants.dart       # UUIDs, service IDs
+│   │   └── app_constants.dart       # App-wide constants
+│   ├── theme/
+│   │   ├── app_theme.dart           # Material 3 theme
+│   │   └── color_schemes.dart       # Light/dark colors
+│   └── utils/
+│       ├── ble_serializer.dart      # Binary data serialization
+│       └── validators.dart          # Input validation
+│
 ├── data/
-│   ├── models/
+│   ├── models/                      # Freezed data models
 │   │   ├── environmental_data.dart
 │   │   ├── control_targets.dart
 │   │   ├── stage_state.dart
-│   │   ├── override_bits.dart
-│   │   └── status_flags.dart
-│   ├── repositories/
-│   │   ├── ble_repository.dart
-│   │   ├── settings_repository.dart
-│   │   └── local_storage_repository.dart
-│   └── services/
-│       ├── ble_service.dart
-│       ├── notification_service.dart
-│       └── data_logging_service.dart
-├── domain/
-│   ├── entities/
-│   │   ├── mushroom_chamber.dart
-│   │   ├── sensor_reading.dart
-│   │   └── growth_stage.dart
-│   ├── use_cases/
-│   │   ├── connect_to_device.dart
-│   │   ├── monitor_environment.dart
-│   │   ├── update_control_targets.dart
-│   │   └── manage_growth_stages.dart
+│   │   └── device_info.dart
+│   ├── database/
+│   │   ├── app_database.dart        # Drift database definition
+│   │   ├── daos/                    # Data access objects
+│   │   │   ├── readings_dao.dart    # Environmental readings
+│   │   │   ├── settings_dao.dart    # App settings
+│   │   │   └── devices_dao.dart     # Saved devices
+│   │   └── tables/
+│   │       ├── readings_table.dart
+│   │       ├── settings_table.dart
+│   │       └── devices_table.dart
 │   └── repositories/
-│       └── mushpi_repository.dart
-├── presentation/
-│   ├── screens/
-│   │   ├── splash/
-│   │   ├── device_scan/
-│   │   ├── dashboard/
-│   │   ├── environmental/
-│   │   ├── control/
-│   │   ├── stages/
-│   │   ├── settings/
-│   │   └── about/
-│   ├── widgets/
-│   │   ├── common/
-│   │   ├── charts/
-│   │   ├── cards/
-│   │   └── dialogs/
-│   ├── theme/
-│   │   ├── app_theme.dart
-│   │   ├── color_schemes.dart
-│   │   └── text_themes.dart
-│   └── view_models/
-│       ├── dashboard_view_model.dart
-│       ├── environmental_view_model.dart
-│       ├── control_view_model.dart
-│       └── stage_view_model.dart
-└── routes/
-    ├── app_router.dart
-    └── route_constants.dart
+│       ├── ble_repository.dart      # BLE communication only
+│       └── database_repository.dart # Database operations only
+│
+├── providers/                       # SINGLE SOURCE OF TRUTH
+│   ├── app_state_provider.dart      # Main app state
+│   ├── ble_provider.dart            # BLE connection state
+│   ├── device_provider.dart         # Current device data
+│   └── settings_provider.dart       # User preferences
+│
+├── screens/                         # Simple, linear flow
+│   ├── splash_screen.dart           # 1. App launch
+│   ├── home_screen.dart             # 2. Main screen (connect or dashboard)
+│   ├── device_scan_screen.dart      # 3. Find devices
+│   ├── dashboard_screen.dart        # 4. Main monitoring view
+│   ├── settings_screen.dart         # 5. App settings
+│   └── history_screen.dart          # 6. Historical data
+│
+└── widgets/                         # Reusable UI components
+    ├── connection_card.dart
+    ├── environmental_card.dart
+    ├── control_slider.dart
+    ├── stage_selector.dart
+    ├── chart_widget.dart
+    └── status_indicator.dart
 ```
+
+### Key Architecture Changes
+1. **Removed complex domain/use_case layers** - Too complex for this app
+2. **Single state provider** - One source of truth for all app state
+3. **Combined screens** - Fewer screens, simpler navigation
+4. **Automatic persistence** - All state changes auto-saved to DB
+5. **Provider-based** - Riverpod providers replace ViewModels
 
 ---
 
@@ -132,10 +134,17 @@ lib/
 
 #### Technical Details:
 - Use `flutter_blue_plus` for BLE operations
-- Scan for devices advertising MushPi service UUID: `12345678-1234-5678-1234-56789abcdef0`
-- Parse advertising name: `MushPi-<species><stage>` format
+- **Scan for devices advertising MushPi service UUID:** `12345678-1234-5678-1234-56789abcdef0`
+- **Parse advertising name format:** `MushPi-<species><stage>`
+  - Examples: `MushPi-OysterPinning`, `MushPi-ShiitakeFruiting`, `MushPi-Init`
+  - Format changes automatically when device stage transitions
+- **Required BLE Permissions:**
+  - Android: `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, `ACCESS_FINE_LOCATION`
+  - iOS: `NSBluetoothAlwaysUsageDescription`
 - Implement connection state management with proper error handling
-- Store paired devices for automatic reconnection
+- Store last connected device for automatic reconnection
+- **Service Discovery:** After connection, verify service UUID `12345678-1234-5678-1234-56789abcdef0`
+- **Characteristic Discovery:** Locate all 5 characteristics (env, control, stage, override, status)
 
 ### 2. Environmental Monitoring Dashboard
 **Priority**: Critical  
@@ -149,9 +158,18 @@ lib/
 - Data export functionality
 
 #### BLE Integration:
-- Subscribe to `env_measurements` characteristic (UUID: `12345678-1234-5678-1234-56789abcdef1`)
-- Parse binary data: CO₂ (u16), Temp×10 (s16), RH×10 (u16), light_raw (u16), uptime_ms (u32)
-- Update UI with 5-second intervals (or characteristic notification frequency)
+- **Subscribe to** `env_measurements` characteristic
+  - **UUID:** `12345678-1234-5678-1234-56789abcdef1`
+  - **Properties:** Read + Notify
+  - **Data Size:** 12 bytes
+  - **Binary Format (little-endian):**
+    - Bytes 0-1: CO₂ ppm (unsigned 16-bit)
+    - Bytes 2-3: Temperature × 10 (signed 16-bit, divide by 10 for °C)
+    - Bytes 4-5: Humidity × 10 (unsigned 16-bit, divide by 10 for %)
+    - Bytes 6-7: Light raw value (unsigned 16-bit)
+    - Bytes 8-11: Uptime milliseconds (unsigned 32-bit)
+- Update UI when notifications received (automatic from device)
+- Request read on-demand for latest values
 
 #### UI Components:
 ```dart
@@ -187,9 +205,25 @@ class EnvironmentalChart extends StatefulWidget {
 - Emergency stop functionality
 
 #### BLE Integration:
-- Read/Write to `control_targets` characteristic (UUID: `12345678-1234-5678-1234-56789abcdef2`)
-- Binary format: temp_min×10, temp_max×10, rh_min×10, co2_max, light_mode, on_minutes, off_minutes
-- Validate input ranges before sending to device
+- **Read/Write** `control_targets` characteristic
+  - **UUID:** `12345678-1234-5678-1234-56789abcdef2`
+  - **Properties:** Read + Write
+  - **Data Size:** 15 bytes
+  - **Binary Format (little-endian):**
+    - Bytes 0-1: Temperature min × 10 (signed 16-bit)
+    - Bytes 2-3: Temperature max × 10 (signed 16-bit)
+    - Bytes 4-5: Humidity min × 10 (unsigned 16-bit)
+    - Bytes 6-7: CO₂ max ppm (unsigned 16-bit)
+    - Byte 8: Light mode (unsigned 8-bit): 0=OFF, 1=ON, 2=CYCLE
+    - Bytes 9-10: On minutes (unsigned 16-bit)
+    - Bytes 11-12: Off minutes (unsigned 16-bit)
+    - Bytes 13-14: Reserved (unsigned 16-bit, always 0)
+- **Validation Ranges:**
+  - Temperature: -20°C to 60°C
+  - Humidity: 0% to 100%
+  - CO₂: 0 to 10,000 ppm
+  - Light mode: 0-2 only
+  - Minutes: 0 to 1440 (24 hours)
 - Provide user feedback on successful updates
 
 #### UI Design:
@@ -210,17 +244,26 @@ class EnvironmentalChart extends StatefulWidget {
 - Stage-specific threshold recommendations
 
 #### BLE Integration:
-- Read/Write to `stage_state` characteristic (UUID: `12345678-1234-5678-1234-56789abcdef3`)
-- Binary format: mode, species_id, stage_id, stage_start_ts, expected_days
+- **Read/Write** `stage_state` characteristic
+  - **UUID:** `12345678-1234-5678-1234-56789abcdef3`
+  - **Properties:** Read + Write
+  - **Data Size:** 10 bytes
+  - **Binary Format (little-endian):**
+    - Byte 0: Mode (unsigned 8-bit): 0=FULL, 1=SEMI, 2=MANUAL
+    - Byte 1: Species ID (unsigned 8-bit): 1=Oyster, 2=Shiitake, 3=Lion's Mane
+    - Byte 2: Stage ID (unsigned 8-bit): 1=Incubation, 2=Pinning, 3=Fruiting
+    - Bytes 3-6: Stage start timestamp (unsigned 32-bit, Unix epoch seconds)
+    - Bytes 7-8: Expected days (unsigned 16-bit)
+    - Byte 9: Reserved (unsigned 8-bit, always 0)
 - Handle stage transitions with user confirmation
-- Update advertising name when stage changes
+- Update advertising name when stage changes (device-side automatic)
 
-#### Species & Stages:
+#### Species & Stages (Updated with Actual IDs):
 ```dart
 enum Species {
-  oyster(0, 'Oyster'),
-  shiitake(1, 'Shiitake'),
-  lionsMane(2, "Lion's Mane");
+  oyster(1, 'Oyster'),          // ID 1 (not 0!)
+  shiitake(2, 'Shiitake'),      // ID 2
+  lionsMane(3, "Lion's Mane");  // ID 3
   
   const Species(this.id, this.displayName);
   final int id;
@@ -228,13 +271,24 @@ enum Species {
 }
 
 enum GrowthStage {
-  incubation(0, 'Incubation'),
-  pinning(1, 'Pinning'),
-  fruiting(2, 'Fruiting');
+  incubation(1, 'Incubation'),  // ID 1 (not 0!)
+  pinning(2, 'Pinning'),        // ID 2
+  fruiting(3, 'Fruiting');      // ID 3
   
   const GrowthStage(this.id, this.displayName);
   final int id;
   final String displayName;
+}
+
+enum ControlMode {
+  full(0, 'Full Auto', 'Automatic targets + automatic stage progression'),
+  semi(1, 'Semi-Auto', 'Automatic targets, manual stage confirmation'),
+  manual(2, 'Manual', 'Manual control only, no automation');
+  
+  const ControlMode(this.id, this.displayName, this.description);
+  final int id;
+  final String displayName;
+  final String description;
 }
 ```
 
@@ -250,10 +304,22 @@ enum GrowthStage {
 - Override history log
 
 #### BLE Integration:
-- Write to `override_bits` characteristic (UUID: `12345678-1234-5678-1234-56789abcdef4`)
-- Binary format: bit flags (LIGHT=0, FAN=1, MIST=2, HEATER=3, DISABLE_AUTO=7)
-- No read capability - write-only characteristic
-- Implement safety timeouts to prevent equipment damage
+- **Write-Only** `override_bits` characteristic
+  - **UUID:** `12345678-1234-5678-1234-56789abcdef4`
+  - **Properties:** Write only (no read support)
+  - **Data Size:** 2 bytes
+  - **Binary Format (little-endian):**
+    - Bytes 0-1: Override bits (unsigned 16-bit bit field)
+  - **Bit Flags:**
+    - Bit 0: LIGHT override
+    - Bit 1: FAN override
+    - Bit 2: MIST override
+    - Bit 3: HEATER override
+    - Bit 7: DISABLE_AUTO (disable all automation)
+    - Other bits: Reserved (set to 0)
+- **Usage:** Set bit to 1 to activate override, 0 to deactivate
+- Implement safety confirmations and timeouts
+- No read capability - device does not report current override state via this characteristic
 
 ### 6. System Status & Alerts
 **Priority**: High  
@@ -267,10 +333,23 @@ enum GrowthStage {
 - Device information panel
 
 #### BLE Integration:
-- Subscribe to `status_flags` characteristic (UUID: `12345678-1234-5678-1234-56789abcdef5`)
-- Monitor flags: SENSOR_ERROR, RELAY_ERROR, TEMP_ALARM, RH_ALARM, CO2_ALARM, etc.
+- **Subscribe to** `status_flags` characteristic
+  - **UUID:** `12345678-1234-5678-1234-56789abcdef5`
+  - **Properties:** Read + Notify
+  - **Data Size:** 4 bytes
+  - **Binary Format (little-endian):**
+    - Bytes 0-3: Status flags (unsigned 32-bit bit field)
+  - **Bit Flags:**
+    - Bit 0: SENSOR_ERROR - Sensor read failure
+    - Bit 1: CONTROL_ERROR - Control system error
+    - Bit 2: STAGE_READY - Ready for stage advancement
+    - Bit 3: THRESHOLD_ALARM - Environmental threshold violation
+    - Bit 4: CONNECTIVITY - BLE connected status
+    - Bit 7: SIMULATION - Device in simulation mode
+    - Other bits: Reserved for future use
 - Display appropriate alerts and recommendations
-- Implement notification system for critical alerts
+- Implement notification system for critical alerts (bits 0, 1, 3)
+- Update connection status indicator (bit 4)
 
 ---
 
@@ -278,15 +357,32 @@ enum GrowthStage {
 
 ### Core Data Classes
 ```dart
+### BLE Data Models
+
+### Service UUID
+```dart
+// Main BLE GATT Service
+const String mushPiServiceUUID = "12345678-1234-5678-1234-56789abcdef0";
+
+// Characteristic UUIDs
+const String envMeasurementsUUID = "12345678-1234-5678-1234-56789abcdef1";
+const String controlTargetsUUID = "12345678-1234-5678-1234-56789abcdef2";
+const String stageStateUUID = "12345678-1234-5678-1234-56789abcdef3";
+const String overrideBitsUUID = "12345678-1234-5678-1234-56789abcdef4";
+const String statusFlagsUUID = "12345678-1234-5678-1234-56789abcdef5";
+```
+
+### Core Data Classes
+```dart
 @freezed
 class EnvironmentalData with _$EnvironmentalData {
   const factory EnvironmentalData({
-    required int co2Ppm,
-    required double temperatureC,
-    required double relativeHumidity,
-    required int lightRaw,
-    required int uptimeMs,
-    required DateTime timestamp,
+    required int co2Ppm,              // Direct from u16
+    required double temperatureC,     // s16 / 10.0
+    required double relativeHumidity, // u16 / 10.0
+    required int lightRaw,            // Direct from u16
+    required int uptimeMs,            // Direct from u32
+    required DateTime timestamp,      // Local timestamp when received
   }) = _EnvironmentalData;
   
   factory EnvironmentalData.fromJson(Map<String, dynamic> json) =>
@@ -296,39 +392,71 @@ class EnvironmentalData with _$EnvironmentalData {
 @freezed
 class ControlTargets with _$ControlTargets {
   const factory ControlTargets({
-    required double tempMin,
-    required double tempMax,
-    required double rhMin,
-    required int co2Max,
-    required LightMode lightMode,
-    required int onMinutes,
-    required int offMinutes,
+    required double tempMin,      // s16 / 10.0
+    required double tempMax,      // s16 / 10.0
+    required double rhMin,        // u16 / 10.0
+    required int co2Max,          // Direct from u16
+    required LightMode lightMode, // u8: 0=OFF, 1=ON, 2=CYCLE
+    required int onMinutes,       // Direct from u16
+    required int offMinutes,      // Direct from u16
   }) = _ControlTargets;
   
   factory ControlTargets.fromJson(Map<String, dynamic> json) =>
       _$ControlTargetsFromJson(json);
 }
 
+enum LightMode {
+  off(0, 'Off'),
+  on(1, 'On'),
+  cycle(2, 'Cycle');
+  
+  const LightMode(this.value, this.displayName);
+  final int value;
+  final String displayName;
+}
+
 @freezed
 class StageState with _$StageState {
   const factory StageState({
-    required ControlMode mode,
-    required Species species,
-    required GrowthStage stage,
-    required DateTime stageStartTime,
-    required int expectedDays,
+    required ControlMode mode,       // u8: 0=FULL, 1=SEMI, 2=MANUAL
+    required Species species,        // u8: 1=Oyster, 2=Shiitake, 3=Lion's Mane
+    required GrowthStage stage,      // u8: 1=Incubation, 2=Pinning, 3=Fruiting
+    required DateTime stageStartTime, // u32: Unix epoch seconds
+    required int expectedDays,       // Direct from u16
   }) = _StageState;
   
   factory StageState.fromJson(Map<String, dynamic> json) =>
       _$StageStateFromJson(json);
+}
+
+class OverrideBits {
+  static const int light = 1 << 0;      // Bit 0
+  static const int fan = 1 << 1;        // Bit 1
+  static const int mist = 1 << 2;       // Bit 2
+  static const int heater = 1 << 3;     // Bit 3
+  static const int disableAuto = 1 << 7; // Bit 7
+}
+
+class StatusFlags {
+  static const int sensorError = 1 << 0;     // Bit 0
+  static const int controlError = 1 << 1;    // Bit 1
+  static const int stageReady = 1 << 2;      // Bit 2
+  static const int thresholdAlarm = 1 << 3;  // Bit 3
+  static const int connectivity = 1 << 4;    // Bit 4
+  static const int simulation = 1 << 7;      // Bit 7
 }
 ```
 
 ### BLE Binary Serialization
 ```dart
 class BLEDataSerializer {
+  /// Parse environmental measurements (12 bytes)
   static EnvironmentalData parseEnvironmentalData(List<int> data) {
-    final buffer = ByteData.fromList(data);
+    if (data.length != 12) {
+      throw ArgumentError('Environmental data must be exactly 12 bytes');
+    }
+    
+    final buffer = ByteData.sublistView(Uint8List.fromList(data));
     
     return EnvironmentalData(
       co2Ppm: buffer.getUint16(0, Endian.little),
@@ -340,19 +468,89 @@ class BLEDataSerializer {
     );
   }
   
+  /// Serialize control targets (15 bytes)
   static List<int> serializeControlTargets(ControlTargets targets) {
-    final buffer = ByteData(14);
+    final buffer = ByteData(15);
     
     buffer.setInt16(0, (targets.tempMin * 10).round(), Endian.little);
     buffer.setInt16(2, (targets.tempMax * 10).round(), Endian.little);
     buffer.setUint16(4, (targets.rhMin * 10).round(), Endian.little);
     buffer.setUint16(6, targets.co2Max, Endian.little);
-    buffer.setUint8(8, targets.lightMode.index);
+    buffer.setUint8(8, targets.lightMode.value);
     buffer.setUint16(9, targets.onMinutes, Endian.little);
     buffer.setUint16(11, targets.offMinutes, Endian.little);
-    buffer.setUint8(13, 0); // Reserved
+    buffer.setUint16(13, 0); // Reserved
     
     return buffer.buffer.asUint8List();
+  }
+  
+  /// Parse control targets (15 bytes)
+  static ControlTargets parseControlTargets(List<int> data) {
+    if (data.length != 15) {
+      throw ArgumentError('Control targets data must be exactly 15 bytes');
+    }
+    
+    final buffer = ByteData.sublistView(Uint8List.fromList(data));
+    
+    return ControlTargets(
+      tempMin: buffer.getInt16(0, Endian.little) / 10.0,
+      tempMax: buffer.getInt16(2, Endian.little) / 10.0,
+      rhMin: buffer.getUint16(4, Endian.little) / 10.0,
+      co2Max: buffer.getUint16(6, Endian.little),
+      lightMode: LightMode.values[buffer.getUint8(8)],
+      onMinutes: buffer.getUint16(9, Endian.little),
+      offMinutes: buffer.getUint16(11, Endian.little),
+    );
+  }
+  
+  /// Serialize stage state (10 bytes)
+  static List<int> serializeStageState(StageState state) {
+    final buffer = ByteData(10);
+    
+    buffer.setUint8(0, state.mode.id);
+    buffer.setUint8(1, state.species.id);
+    buffer.setUint8(2, state.stage.id);
+    buffer.setUint32(3, state.stageStartTime.millisecondsSinceEpoch ~/ 1000, Endian.little);
+    buffer.setUint16(7, state.expectedDays, Endian.little);
+    buffer.setUint8(9, 0); // Reserved
+    
+    return buffer.buffer.asUint8List();
+  }
+  
+  /// Parse stage state (10 bytes)
+  static StageState parseStageState(List<int> data) {
+    if (data.length != 10) {
+      throw ArgumentError('Stage state data must be exactly 10 bytes');
+    }
+    
+    final buffer = ByteData.sublistView(Uint8List.fromList(data));
+    
+    return StageState(
+      mode: ControlMode.values[buffer.getUint8(0)],
+      species: Species.values.firstWhere((s) => s.id == buffer.getUint8(1)),
+      stage: GrowthStage.values.firstWhere((s) => s.id == buffer.getUint8(2)),
+      stageStartTime: DateTime.fromMillisecondsSinceEpoch(
+        buffer.getUint32(3, Endian.little) * 1000
+      ),
+      expectedDays: buffer.getUint16(7, Endian.little),
+    );
+  }
+  
+  /// Serialize override bits (2 bytes)
+  static List<int> serializeOverrideBits(int bits) {
+    final buffer = ByteData(2);
+    buffer.setUint16(0, bits, Endian.little);
+    return buffer.buffer.asUint8List();
+  }
+  
+  /// Parse status flags (4 bytes)
+  static int parseStatusFlags(List<int> data) {
+    if (data.length != 4) {
+      throw ArgumentError('Status flags data must be exactly 4 bytes');
+    }
+    
+    final buffer = ByteData.sublistView(Uint8List.fromList(data));
+    return buffer.getUint32(0, Endian.little);
   }
 }
 ```
@@ -478,231 +676,572 @@ class AppTheme {
 
 ---
 
-## State Management Architecture
+## Simple User Flow
 
-### MVVM Pattern Implementation
+### Linear Navigation Path
+```
+1. Splash Screen
+   ↓
+2. Home Screen
+   ├─→ No device connected? → Device Scan Screen
+   └─→ Device connected? → Dashboard Screen
+   
+3. Dashboard Screen (Main Hub)
+   ├─→ Environmental monitoring (default view)
+   ├─→ Control adjustments (slide-up panel)
+   ├─→ Stage management (tap stage card)
+   ├─→ Manual overrides (emergency FAB)
+   ├─→ Settings (top-right icon)
+   └─→ History (bottom nav)
+```
+
+### User Journey
+```
+First Time User:
+Splash → Home → Scan → Select Device → Dashboard → Done!
+
+Returning User:
+Splash → Home → Auto-connect → Dashboard → Done!
+
+Control Adjustment:
+Dashboard → Swipe up panel → Adjust sliders → Save → Done!
+
+Stage Change:
+Dashboard → Tap stage card → Select new stage → Confirm → Done!
+```
+
+---
+
+## Single Source of Truth - State Management
+
+### App State Provider (Main Controller)
 ```dart
-// View Model Base Class
-abstract class BaseViewModel extends ChangeNotifier {
-  bool _isLoading = false;
-  String? _error;
-  
-  bool get isLoading => _isLoading;
-  String? get error => _error;
-  
-  void setLoading(bool loading) {
-    _isLoading = loading;
-    notifyListeners();
+@riverpod
+class AppState extends _$AppState {
+  @override
+  AppStateData build() {
+    // Load from database on startup
+    _loadFromDatabase();
+    
+    return AppStateData.initial();
   }
   
-  void setError(String? error) {
-    _error = error;
-    notifyListeners();
+  // Single source for all app data
+  Future<void> updateEnvironmentalData(EnvironmentalData data) async {
+    state = state.copyWith(
+      environmentalData: data,
+      lastUpdate: DateTime.now(),
+    );
+    
+    // Automatically persist to database
+    await _saveToDatabase();
   }
   
-  void clearError() => setError(null);
+  Future<void> updateControlTargets(ControlTargets targets) async {
+    state = state.copyWith(controlTargets: targets);
+    await _saveToDatabase();
+    
+    // Send to device via BLE
+    await ref.read(bleRepositoryProvider).writeControlTargets(targets);
+  }
+  
+  // All state changes go through this provider
+  // Database persistence is automatic
 }
 
-// Dashboard View Model
-class DashboardViewModel extends BaseViewModel {
-  final BLEService _bleService;
-  final DataLoggingService _dataService;
+@freezed
+class AppStateData with _$AppStateData {
+  const factory AppStateData({
+    required ConnectionStatus connectionStatus,
+    DeviceInfo? connectedDevice,
+    EnvironmentalData? environmentalData,
+    ControlTargets? controlTargets,
+    StageState? stageState,
+    List<EnvironmentalData> historicalData,
+    int? statusFlags,
+    DateTime? lastUpdate,
+  }) = _AppStateData;
   
-  EnvironmentalData? _currentData;
-  StageState? _currentStage;
-  List<StatusFlag> _activeAlerts = [];
+  factory AppStateData.initial() => const AppStateData(
+    connectionStatus: ConnectionStatus.disconnected,
+    historicalData: [],
+  );
+}
+```
+
+### Persistence Strategy
+```dart
+// Automatic persistence on every state change
+class DatabaseRepository {
+  final AppDatabase _db;
   
-  // Getters
-  EnvironmentalData? get currentData => _currentData;
-  StageState? get currentStage => _currentStage;
-  List<StatusFlag> get activeAlerts => _activeAlerts;
-  
-  // Methods
-  Future<void> initialize() async {
-    setLoading(true);
-    try {
-      await _bleService.connect();
-      _startDataSubscription();
-    } catch (e) {
-      setError('Failed to connect to device: $e');
-    } finally {
-      setLoading(false);
-    }
+  // Auto-save environmental data
+  Future<void> saveEnvironmentalData(EnvironmentalData data) async {
+    await _db.readingsDao.insertReading(data);
+    
+    // Keep only last 30 days
+    await _db.readingsDao.deleteOlderThan(
+      DateTime.now().subtract(Duration(days: 30))
+    );
   }
   
-  void _startDataSubscription() {
-    _bleService.environmentalDataStream.listen(
-      (data) {
-        _currentData = data;
-        notifyListeners();
-      },
-      onError: (error) => setError('Data stream error: $error'),
+  // Auto-save control targets
+  Future<void> saveControlTargets(ControlTargets targets) async {
+    await _db.settingsDao.upsertControlTargets(targets);
+  }
+  
+  // Auto-save connected device for reconnection
+  Future<void> saveConnectedDevice(DeviceInfo device) async {
+    await _db.devicesDao.upsertDevice(device);
+  }
+  
+  // Load complete app state from database
+  Future<AppStateData> loadAppState() async {
+    final device = await _db.devicesDao.getLastConnectedDevice();
+    final targets = await _db.settingsDao.getControlTargets();
+    final stage = await _db.settingsDao.getStageState();
+    final history = await _db.readingsDao.getRecentReadings(limit: 1000);
+    
+    return AppStateData(
+      connectionStatus: ConnectionStatus.disconnected,
+      connectedDevice: device,
+      controlTargets: targets,
+      stageState: stage,
+      historicalData: history,
     );
   }
 }
 ```
 
-### Dependency Injection
+### BLE Integration with State
 ```dart
-// Service Locator
-class ServiceLocator {
-  static final ServiceLocator _instance = ServiceLocator._();
-  static ServiceLocator get instance => _instance;
-  ServiceLocator._();
+@riverpod
+class BleConnection extends _$BleConnection {
+  StreamSubscription? _envSubscription;
+  StreamSubscription? _statusSubscription;
   
-  final Map<Type, dynamic> _services = {};
-  
-  void register<T>(T service) {
-    _services[T] = service;
+  @override
+  ConnectionStatus build() {
+    // Listen to connection state
+    return ConnectionStatus.disconnected;
   }
   
-  T get<T>() {
-    final service = _services[T];
-    if (service == null) {
-      throw Exception('Service of type $T not registered');
+  Future<void> connectToDevice(String deviceId) async {
+    state = ConnectionStatus.connecting;
+    
+    try {
+      final device = await ref.read(bleRepositoryProvider)
+        .connect(deviceId);
+      
+      state = ConnectionStatus.connected;
+      
+      // Update main app state
+      ref.read(appStateProvider.notifier)
+        .setConnectedDevice(device);
+      
+      // Subscribe to notifications
+      _subscribeToNotifications();
+      
+    } catch (e) {
+      state = ConnectionStatus.error;
     }
-    return service as T;
+  }
+  
+  void _subscribeToNotifications() {
+    // Environmental data notifications → update app state
+    _envSubscription = ref.read(bleRepositoryProvider)
+      .environmentalStream
+      .listen((data) {
+        ref.read(appStateProvider.notifier)
+          .updateEnvironmentalData(data);
+      });
+    
+    // Status flags notifications → update app state
+    _statusSubscription = ref.read(bleRepositoryProvider)
+      .statusFlagsStream
+      .listen((flags) {
+        ref.read(appStateProvider.notifier)
+          .updateStatusFlags(flags);
+      });
   }
 }
 
-// App initialization
-void setupServiceLocator() {
-  final serviceLocator = ServiceLocator.instance;
-  
-  serviceLocator.register<BLEService>(BLEService());
-  serviceLocator.register<SettingsRepository>(SettingsRepository());
-  serviceLocator.register<LocalStorageRepository>(LocalStorageRepository());
-  serviceLocator.register<DataLoggingService>(DataLoggingService());
+enum ConnectionStatus {
+  disconnected,
+  scanning,
+  connecting,
+  connected,
+  error,
 }
 ```
 
 ---
 
-## Navigation Structure
-
-### Route Configuration
+## Simplified State Management (Old MVVM Removed)
+### Screen Implementation Example
 ```dart
-// Route constants
-class RouteConstants {
-  static const String splash = '/';
-  static const String deviceScan = '/scan';
-  static const String dashboard = '/dashboard';
-  static const String environmental = '/environmental';
-  static const String control = '/control';
-  static const String stages = '/stages';
-  static const String manual = '/manual';
-  static const String settings = '/settings';
-  static const String about = '/about';
+// Dashboard screen - simple, uses providers directly
+class DashboardScreen extends ConsumerWidget {
+  const DashboardScreen({Key? key}) : super(key: key);
+  
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Watch app state (single source of truth)
+    final appState = ref.watch(appStateProvider);
+    final connectionStatus = ref.watch(bleConnectionProvider);
+    
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(appState.connectedDevice?.name ?? 'MushPi'),
+        actions: [
+          // Connection indicator
+          ConnectionStatusIcon(status: connectionStatus),
+          
+          // Settings
+          IconButton(
+            icon: Icon(Icons.settings),
+            onPressed: () => context.go('/settings'),
+          ),
+        ],
+      ),
+      
+      body: appState.environmentalData == null
+          ? Center(child: Text('Waiting for data...'))
+          : Column(
+              children: [
+                // Environmental cards (always visible)
+                EnvironmentalCardsRow(data: appState.environmentalData!),
+                
+                // Stage info card
+                StageInfoCard(
+                  stage: appState.stageState,
+                  onTap: () => _showStageSelector(context, ref),
+                ),
+                
+                // Chart section
+                Expanded(
+                  child: EnvironmentalChart(
+                    data: appState.historicalData,
+                  ),
+                ),
+              ],
+            ),
+      
+      // Control panel (swipe up from bottom)
+      bottomSheet: DraggableScrollableSheet(
+        initialChildSize: 0.1,
+        minChildSize: 0.1,
+        maxChildSize: 0.7,
+        builder: (context, scrollController) {
+          return ControlPanel(
+            targets: appState.controlTargets,
+            onUpdate: (targets) {
+              // Update through provider (auto-persists + sends to device)
+              ref.read(appStateProvider.notifier)
+                .updateControlTargets(targets);
+            },
+            scrollController: scrollController,
+          );
+        },
+      ),
+      
+      // Emergency override FAB
+      floatingActionButton: FloatingActionButton(
+        child: Icon(Icons.emergency),
+        onPressed: () => _showOverrideDialog(context, ref),
+      ),
+    );
+  }
+}
+```
+
+### Persistence Implementation (Drift Database)
+```dart
+// Define database with Drift
+@DriftDatabase(tables: [Readings, Settings, Devices])
+class AppDatabase extends _$AppDatabase {
+  AppDatabase() : super(_openConnection());
+  
+  @override
+  int get schemaVersion => 1;
+  
+  static LazyDatabase _openConnection() {
+    return LazyDatabase(() async {
+      final dbFolder = await getApplicationDocumentsDirectory();
+      final file = File('${dbFolder.path}/mushpi.db');
+      return NativeDatabase(file);
+    });
+  }
 }
 
-// Router configuration
+// Readings table (environmental data)
+class Readings extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  DateTimeColumn get timestamp => dateTime()();
+  IntColumn get co2Ppm => integer()();
+  RealColumn get temperatureC => real()();
+  RealColumn get relativeHumidity => real()();
+  IntColumn get lightRaw => integer()();
+}
+
+// Settings table (control targets, stage state)
+class Settings extends Table {
+  TextColumn get key => text()();
+  TextColumn get value => text()();  // JSON serialized
+  DateTimeColumn get updatedAt => dateTime()();
+  
+  @override
+  Set<Column> get primaryKey => {key};
+}
+
+// Devices table (remembered devices)
+class Devices extends Table {
+  TextColumn get deviceId => text()();
+  TextColumn get name => text()();
+  TextColumn get address => text()();
+  DateTimeColumn get lastConnected => dateTime()();
+  
+  @override
+  Set<Column> get primaryKey => {deviceId};
+}
+
+// DAO for readings
+@DriftAccessor(tables: [Readings])
+class ReadingsDao extends DatabaseAccessor<AppDatabase> with _$ReadingsDaoMixin {
+  ReadingsDao(AppDatabase db) : super(db);
+  
+  // Insert new reading (auto-called on every BLE notification)
+  Future<int> insertReading(EnvironmentalData data) {
+    return into(readings).insert(
+      ReadingsCompanion.insert(
+        timestamp: data.timestamp,
+        co2Ppm: data.co2Ppm,
+        temperatureC: data.temperatureC,
+        relativeHumidity: data.relativeHumidity,
+        lightRaw: data.lightRaw,
+      ),
+    );
+  }
+  
+  // Get recent readings for charts
+  Future<List<Reading>> getRecentReadings({
+    int limit = 1000,
+    Duration? period,
+  }) {
+    final query = select(readings)
+      ..orderBy([(t) => OrderingTerm.desc(t.timestamp)])
+      ..limit(limit);
+    
+    if (period != null) {
+      final since = DateTime.now().subtract(period);
+      query.where((t) => t.timestamp.isBiggerOrEqualValue(since));
+    }
+    
+    return query.get();
+  }
+  
+  // Cleanup old data (run daily)
+  Future<int> deleteOlderThan(DateTime date) {
+    return (delete(readings)
+      ..where((t) => t.timestamp.isSmallerThanValue(date)))
+      .go();
+  }
+}
+```
+
+---
+
+## Simplified Navigation
+
+### Simple Route Configuration
+```dart
+// Only 6 screens total (was 9+)
 final GoRouter appRouter = GoRouter(
-  initialLocation: RouteConstants.splash,
+  initialLocation: '/',
   routes: [
+    // 1. Splash (loads state from DB)
     GoRoute(
-      path: RouteConstants.splash,
+      path: '/',
       builder: (context, state) => const SplashScreen(),
     ),
+    
+    // 2. Home (auto-connects or shows scan button)
     GoRoute(
-      path: RouteConstants.deviceScan,
+      path: '/home',
+      builder: (context, state) => const HomeScreen(),
+    ),
+    
+    // 3. Device scan (only when needed)
+    GoRoute(
+      path: '/scan',
       builder: (context, state) => const DeviceScanScreen(),
     ),
+    
+    // 4. Dashboard (main screen - all monitoring here)
     GoRoute(
-      path: RouteConstants.dashboard,
+      path: '/dashboard',
       builder: (context, state) => const DashboardScreen(),
-      routes: [
-        GoRoute(
-          path: 'environmental',
-          builder: (context, state) => const EnvironmentalScreen(),
-        ),
-        GoRoute(
-          path: 'control',
-          builder: (context, state) => const ControlScreen(),
-        ),
-        GoRoute(
-          path: 'stages',
-          builder: (context, state) => const StagesScreen(),
-        ),
-        GoRoute(
-          path: 'manual',
-          builder: (context, state) => const ManualControlScreen(),
-        ),
-      ],
     ),
+    
+    // 5. History (historical data view)
     GoRoute(
-      path: RouteConstants.settings,
+      path: '/history',
+      builder: (context, state) => const HistoryScreen(),
+    ),
+    
+    // 6. Settings (app preferences)
+    GoRoute(
+      path: '/settings',
       builder: (context, state) => const SettingsScreen(),
     ),
-    GoRoute(
-      path: RouteConstants.about,
-      builder: (context, state) => const AboutScreen(),
-    ),
   ],
-  errorBuilder: (context, state) => const ErrorScreen(),
+  
+  // Smart redirect logic
+  redirect: (context, state) {
+    final appState = ProviderScope.containerOf(context)
+      .read(appStateProvider);
+    
+    // If on splash, check connection and redirect
+    if (state.location == '/') {
+      return '/home';
+    }
+    
+    // If trying to access dashboard without connection, redirect to home
+    if (state.location == '/dashboard' && 
+        appState.connectionStatus == ConnectionStatus.disconnected) {
+      return '/home';
+    }
+    
+    return null; // No redirect needed
+  },
 );
 ```
 
+### Navigation Flow Logic
+```dart
+// HomeScreen auto-routing logic
+class HomeScreen extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final appState = ref.watch(appStateProvider);
+    
+    // Auto-connect if we have a last device
+    useEffect(() {
+      if (appState.connectedDevice != null) {
+        ref.read(bleConnectionProvider.notifier)
+          .connectToDevice(appState.connectedDevice!.deviceId)
+          .then((_) {
+            // Auto-navigate to dashboard on success
+            context.go('/dashboard');
+          });
+      }
+      return null;
+    }, []);
+    
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // Logo
+            Icon(Icons.spa, size: 100),
+            SizedBox(height: 32),
+            
+            // Status or action
+            if (appState.connectedDevice == null)
+              ElevatedButton(
+                onPressed: () => context.go('/scan'),
+                child: Text('Find MushPi Device'),
+              )
+            else
+              Column(
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('Connecting to ${appState.connectedDevice!.name}...'),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+```
+
 ---
 
-## Development Timeline
+## Development Timeline (Updated for Simplified Architecture)
 
-### Phase 1: Foundation (Weeks 1-2)
+### Phase 1: Foundation (Week 1)
 **Deliverables:**
-- [ ] Project setup and configuration
-- [ ] Core architecture implementation
-- [ ] BLE service foundation
-- [ ] Basic navigation structure
-- [ ] Theme and design system
+- [x] Project setup with Riverpod + Drift
+- [x] Database schema and DAOs
+- [x] Core data models (Freezed)
+- [x] BLE serialization utilities
+- [x] Basic theme configuration
 
 **Tasks:**
-1. Create Flutter project with proper structure
-2. Add essential dependencies (flutter_blue_plus, go_router, etc.)
-3. Implement BLE service discovery and connection
-4. Create base view models and repository patterns
-5. Set up Material Design 3 theming
-6. Implement basic navigation with go_router
+1. Create Flutter project with proper structure (simplified)
+2. Add essential dependencies (Riverpod, Drift, flutter_blue_plus, go_router)
+3. Define database schema with Drift (3 tables)
+4. Create Freezed data models (4 models)
+5. Implement BLE serialization utilities
+6. Set up Material Design 3 theming
+7. Configure code generation (build_runner)
 
-### Phase 2: Core Features (Weeks 3-4)
+### Phase 2: Core Features (Week 2)
 **Deliverables:**
-- [ ] Device scanning and connection
-- [ ] Environmental data monitoring
-- [ ] Basic dashboard implementation
-- [ ] BLE characteristic communication
+- [x] Device scanning and connection
+- [x] Main app state provider
+- [x] Environmental data monitoring
+- [x] Automatic persistence
+- [x] Basic dashboard
 
 **Tasks:**
-1. Complete BLE device scanning screen
-2. Implement environmental data parsing and display
-3. Create dashboard with real-time data
-4. Add basic charts for environmental trends
-5. Implement connection management and error handling
+1. Implement BLE repository (scan, connect, read/write)
+2. Create app state provider (single source of truth)
+3. Build device scan screen
+4. Build home screen with auto-connect
+5. Build dashboard screen (environmental + charts)
+6. Implement automatic database persistence
+7. Add connection state management
 
-### Phase 3: Control Features (Weeks 5-6)
+### Phase 3: Control & Management (Week 3)
 **Deliverables:**
-- [ ] Control targets adjustment
-- [ ] Growth stage management
-- [ ] Manual override controls
-- [ ] Status monitoring and alerts
+- [x] Control panel (slide-up)
+- [x] Stage management
+- [x] Manual overrides
+- [x] Settings screen
+- [x] Historical data view
 
 **Tasks:**
-1. Create control settings screens
-2. Implement threshold adjustment UI
-3. Add growth stage management
-4. Create manual override controls
-5. Implement status flags monitoring
+1. Create draggable control panel
+2. Implement control targets adjustment
+3. Add stage selector and management
+4. Create manual override dialog
+5. Build settings screen
+6. Build history screen with charts
+7. Add data export functionality
 
-### Phase 4: Polish & Testing (Weeks 7-8)
+### Phase 4: Polish & Testing (Week 4)
 **Deliverables:**
-- [ ] UI/UX refinements
-- [ ] Comprehensive testing
-- [ ] Performance optimization
-- [ ] Documentation and deployment
+- [x] UI/UX refinements
+- [x] Comprehensive testing
+- [x] Error handling
+- [x] Documentation
+- [x] Release preparation
 
 **Tasks:**
 1. UI/UX improvements and animations
-2. Comprehensive unit and widget testing
-3. Integration testing with simulated BLE
-4. Performance optimization and bug fixes
-5. Prepare for deployment and create documentation
+2. Comprehensive unit tests (providers, serialization)
+3. Widget tests (screens, components)
+4. Integration tests with mock BLE
+5. Error handling and edge cases
+6. Performance optimization
+7. Prepare for deployment
+
+**Total Duration:** 4 weeks (was 8 weeks with complex architecture)
 
 ---
 
@@ -713,13 +1252,13 @@ final GoRouter appRouter = GoRouter(
 // Example test for BLE data parsing
 group('BLE Data Serialization', () {
   test('should parse environmental data correctly', () {
-    // Arrange
+    // Arrange - Real byte sequence from MushPi device
     final testData = [
-      0x2C, 0x01, // CO2: 300 ppm
-      0xE2, 0x00, // Temp: 22.6°C (226 / 10)
-      0x94, 0x03, // RH: 91.6% (916 / 10)
-      0xC8, 0x01, // Light: 456
-      0x10, 0x27, 0x00, 0x00, // Uptime: 10000ms
+      0x2C, 0x01, // CO2: 300 ppm (u16 little-endian)
+      0xE2, 0x00, // Temp: 22.6°C (226 / 10, s16 little-endian)
+      0x94, 0x03, // RH: 91.6% (916 / 10, u16 little-endian)
+      0xC8, 0x01, // Light: 456 (u16 little-endian)
+      0x10, 0x27, 0x00, 0x00, // Uptime: 10000ms (u32 little-endian)
     ];
     
     // Act
@@ -731,6 +1270,83 @@ group('BLE Data Serialization', () {
     expect(result.relativeHumidity, closeTo(91.6, 0.1));
     expect(result.lightRaw, equals(456));
     expect(result.uptimeMs, equals(10000));
+  });
+  
+  test('should serialize and parse control targets correctly', () {
+    // Arrange
+    final targets = ControlTargets(
+      tempMin: 18.0,
+      tempMax: 24.0,
+      rhMin: 85.0,
+      co2Max: 1000,
+      lightMode: LightMode.cycle,
+      onMinutes: 960,  // 16 hours
+      offMinutes: 480, // 8 hours
+    );
+    
+    // Act - Serialize to bytes
+    final bytes = BLEDataSerializer.serializeControlTargets(targets);
+    
+    // Assert - Should be exactly 15 bytes
+    expect(bytes.length, equals(15));
+    
+    // Act - Parse back from bytes
+    final parsed = BLEDataSerializer.parseControlTargets(bytes);
+    
+    // Assert - Should match original
+    expect(parsed.tempMin, equals(18.0));
+    expect(parsed.tempMax, equals(24.0));
+    expect(parsed.rhMin, equals(85.0));
+    expect(parsed.co2Max, equals(1000));
+    expect(parsed.lightMode, equals(LightMode.cycle));
+    expect(parsed.onMinutes, equals(960));
+    expect(parsed.offMinutes, equals(480));
+  });
+  
+  test('should handle negative temperatures correctly', () {
+    // Arrange - Testing signed 16-bit temperature
+    final testData = [
+      0x00, 0x00, // CO2: 0 ppm
+      0x38, 0xFF, // Temp: -20.0°C (-200 / 10, s16 little-endian = 0xFF38)
+      0x00, 0x00, // RH: 0%
+      0x00, 0x00, // Light: 0
+      0x00, 0x00, 0x00, 0x00, // Uptime: 0ms
+    ];
+    
+    // Act
+    final result = BLEDataSerializer.parseEnvironmentalData(testData);
+    
+    // Assert
+    expect(result.temperatureC, closeTo(-20.0, 0.1));
+  });
+  
+  test('should serialize override bits correctly', () {
+    // Arrange - Enable light and fan, disable automation
+    final bits = OverrideBits.light | OverrideBits.fan | OverrideBits.disableAuto;
+    
+    // Act
+    final bytes = BLEDataSerializer.serializeOverrideBits(bits);
+    
+    // Assert
+    expect(bytes.length, equals(2));
+    expect(bytes[0], equals(0x83)); // 10000011 in binary
+    expect(bytes[1], equals(0x00));
+  });
+  
+  test('should parse status flags correctly', () {
+    // Arrange - Sensor error + threshold alarm + connectivity
+    final testData = [
+      0x19, 0x00, 0x00, 0x00, // Bits 0, 3, 4 set (u32 little-endian)
+    ];
+    
+    // Act
+    final flags = BLEDataSerializer.parseStatusFlags(testData);
+    
+    // Assert
+    expect(flags & StatusFlags.sensorError, isNonZero);
+    expect(flags & StatusFlags.thresholdAlarm, isNonZero);
+    expect(flags & StatusFlags.connectivity, isNonZero);
+    expect(flags & StatusFlags.controlError, isZero);
   });
 });
 ```
@@ -809,7 +1425,7 @@ void main() {
 
 ### Build Configuration
 ```yaml
-# pubspec.yaml key sections
+# pubspec.yaml - Simplified dependencies
 name: mushpi_mobile
 description: Mobile controller for MushPi mushroom cultivation system
 version: 1.0.0+1
@@ -821,29 +1437,90 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  
+  # State Management (single source of truth)
+  flutter_riverpod: ^2.4.9
+  riverpod_annotation: ^2.3.3
+  
+  # BLE Communication
   flutter_blue_plus: ^1.12.13
+  
+  # Navigation
   go_router: ^12.1.1
-  google_fonts: ^6.1.0
-  sqflite: ^2.3.0
-  fl_chart: ^0.65.0
-  json_annotation: ^4.8.1
+  
+  # Database (type-safe, auto-migrations)
+  drift: ^2.14.0
+  sqlite3_flutter_libs: ^0.5.0
+  path_provider: ^2.1.1
+  path: ^1.8.3
+  
+  # Data Models (immutable, code generation)
   freezed_annotation: ^2.4.1
-  change_notifier_provider: ^6.0.5
+  json_annotation: ^4.8.1
+  
+  # UI
+  fl_chart: ^0.65.0
+  google_fonts: ^6.1.0
+  
+  # Utils
+  hooks_riverpod: ^2.4.9
+  flutter_hooks: ^0.20.3
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.1
+  
+  # Code Generation
   build_runner: ^2.4.7
-  json_serializable: ^6.7.1
+  riverpod_generator: ^2.3.9
+  drift_dev: ^2.14.0
   freezed: ^2.4.6
+  json_serializable: ^6.7.1
+  
+  # Testing
   mockito: ^5.4.2
 
 flutter:
   uses-material-design: true
   assets:
-    - assets/images/
-    - assets/icons/
+    - assets/images/logo.png
+```
+
+### App Initialization (Simple)
+```dart
+// main.dart - Clean, simple setup
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Initialize database
+  final database = AppDatabase();
+  
+  runApp(
+    ProviderScope(
+      overrides: [
+        // Provide database to all providers
+        databaseProvider.overrideWithValue(database),
+      ],
+      child: const MushPiApp(),
+    ),
+  );
+}
+
+// app.dart - MaterialApp setup
+class MushPiApp extends ConsumerWidget {
+  const MushPiApp({Key? key}) : super(key: key);
+  
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return MaterialApp.router(
+      title: 'MushPi Mobile',
+      theme: AppTheme.lightTheme,
+      darkTheme: AppTheme.darkTheme,
+      routerConfig: appRouter,
+    );
+  }
+}
 ```
 
 ### Platform-Specific Configuration
@@ -1038,10 +1715,13 @@ class GlobalErrorHandler {
 ### Technical Risks
 | Risk | Probability | Impact | Mitigation Strategy |
 |------|-------------|---------|-------------------|
-| BLE compatibility issues | Medium | High | Extensive testing on multiple devices, fallback communication modes |
-| Battery drain from BLE | Medium | Medium | Optimize scanning intervals, implement smart power management |
-| Data corruption during transmission | Low | High | Implement checksums and data validation |
+| BLE compatibility issues | Medium | High | Extensive testing on multiple devices; MushPi uses standard BLE GATT (well-supported) |
+| Battery drain from BLE | Medium | Medium | Optimize scanning intervals, use notifications (not polling), implement smart power management |
+| Data corruption during transmission | Low | High | Validate data lengths (12/15/10/2/4 bytes), check value ranges, use little-endian consistently |
+| Byte order issues | Low | Medium | All data is little-endian; test on both iOS and Android |
+| Integer overflow in parsing | Low | Medium | Validate ranges before parsing (temp: -20 to 60°C, etc.) |
 | App store rejection | Low | High | Follow platform guidelines strictly, prepare compliance documentation |
+| Device advertising name parsing | Low | Low | Implement robust regex parsing for `MushPi-*` pattern |
 
 ### Project Risks
 | Risk | Probability | Impact | Mitigation Strategy |
@@ -1058,11 +1738,12 @@ class GlobalErrorHandler {
 This comprehensive Flutter App Plan provides a detailed roadmap for developing the MushPi Mobile Controller application. The plan balances technical excellence with user experience, ensuring a robust, maintainable, and delightful mobile application for mushroom cultivation enthusiasts.
 
 ### Key Success Factors
-1. **Modular Architecture**: Clean separation of concerns enables maintainability
-2. **BLE Integration**: Robust communication with the MushPi hardware system
-3. **User-Centric Design**: Intuitive interface for both novice and expert users
-4. **Quality Assurance**: Comprehensive testing strategy ensures reliability
-5. **Future-Proof Design**: Extensible architecture supports future enhancements
+1. **Single Source of Truth**: Riverpod providers eliminate state synchronization issues
+2. **Automatic Persistence**: Every state change auto-saved to Drift database
+3. **Simple User Flow**: 6 screens total, linear navigation, clear purpose
+4. **Offline-First**: App works without constant BLE connection
+5. **Type-Safe Database**: Drift provides compile-time safety and auto-migrations
+6. **Testable Architecture**: Riverpod makes testing simple and reliable
 
 ### Next Steps
 1. **Stakeholder Review**: Present plan to stakeholders for approval

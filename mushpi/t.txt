@@ -1,0 +1,185 @@
+# =============================================================================
+# MushPi Environment Configuration Template
+# =============================================================================
+# Copy this file to .env and customize for your deployment
+# For Raspberry Pi deployment, use production paths (e.g., /opt/mushpi)
+# For local development, use your local workspace paths
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# System Paths
+# -----------------------------------------------------------------------------
+# Base application directory (where main.py and app/ are located)
+MUSHPI_APP_DIR=/opt/mushpi/app
+
+# Data directory (for database, logs, etc.)
+MUSHPI_DATA_DIR=/opt/mushpi/data
+
+# Configuration directory (for thresholds.json, etc.)
+MUSHPI_CONFIG_DIR=/opt/mushpi/app/config
+
+# Python virtual environment path
+MUSHPI_VENV_PATH=/opt/mushpi/venv
+
+# -----------------------------------------------------------------------------
+# Database Configuration
+# -----------------------------------------------------------------------------
+# SQLite database path (can be relative to DATA_DIR or absolute)
+MUSHPI_DB_PATH=data/sensors.db
+
+# Database connection timeout (seconds)
+MUSHPI_DB_TIMEOUT=30
+
+# -----------------------------------------------------------------------------
+# GPIO Pin Configuration (BCM numbering)
+# -----------------------------------------------------------------------------
+# DHT22 Temperature/Humidity sensor data pin
+# Default: GPIO 4 (Physical Pin 7) - REQUIRES 10kΩ pull-up resistor to 3.3V
+MUSHPI_DHT22_PIN=4
+
+# Relay control pins
+# Fan exhaust relay (for CO2 reduction and temperature control)
+MUSHPI_RELAY_FAN=17      # GPIO 17 (Physical Pin 11)
+
+# Mist/Humidifier relay (for humidity control)
+MUSHPI_RELAY_MIST=27     # GPIO 27 (Physical Pin 13)
+
+# Grow light relay
+MUSHPI_RELAY_LIGHT=22    # GPIO 22 (Physical Pin 15)
+
+# Heater relay (optional, for temperature control in cold environments)
+MUSHPI_RELAY_HEATER=23   # GPIO 23 (Physical Pin 16)
+
+# -----------------------------------------------------------------------------
+# I2C Device Configuration
+# -----------------------------------------------------------------------------
+# SCD41 CO2/Temperature/Humidity sensor I2C address (hex)
+MUSHPI_SCD41_ADDRESS=0x62
+
+# ADS1115 ADC I2C address (hex) - used for light sensor
+MUSHPI_ADS1115_ADDRESS=0x48
+
+# ADS1115 channel for light sensor (0-3, default A0)
+MUSHPI_LIGHT_SENSOR_CHANNEL=0
+
+# -----------------------------------------------------------------------------
+# Sensor Timing (seconds)
+# -----------------------------------------------------------------------------
+# How often to read from SCD41 sensor (minimum 5 seconds due to sensor limitations)
+MUSHPI_SCD41_INTERVAL=5.0
+
+# How often to read from DHT22 sensor (minimum 2 seconds recommended)
+MUSHPI_DHT22_INTERVAL=2.0
+
+# How often to read light sensor
+MUSHPI_LIGHT_INTERVAL=1.0
+
+# Main monitoring loop interval
+MUSHPI_MONITOR_INTERVAL=30.0
+
+# -----------------------------------------------------------------------------
+# Hardware Calibration
+# -----------------------------------------------------------------------------
+# Light sensor circuit configuration (photoresistor voltage divider)
+# Fixed resistor value in ohms (typically 10kΩ)
+MUSHPI_LIGHT_FIXED_RESISTOR=10000
+
+# Supply voltage for voltage divider (typically 3.3V on Raspberry Pi)
+MUSHPI_LIGHT_VCC=3.3
+
+# Minimum photoresistor resistance (ohms, at maximum light)
+MUSHPI_LIGHT_MIN_RESISTANCE=1000
+
+# Maximum photoresistor resistance (ohms, at minimum light/darkness)
+MUSHPI_LIGHT_MAX_RESISTANCE=100000
+
+# -----------------------------------------------------------------------------
+# Control System Configuration
+# -----------------------------------------------------------------------------
+# Relay logic level
+# true = Active HIGH (GPIO HIGH turns relay ON)
+# false = Active LOW (GPIO LOW turns relay ON) - MOST COMMON for relay modules
+MUSHPI_RELAY_ACTIVE_HIGH=false
+
+# Hysteresis values (prevent rapid relay cycling)
+# Temperature hysteresis (°C) - relay won't switch until this far past threshold
+MUSHPI_TEMP_HYSTERESIS=1.0
+
+# Humidity hysteresis (%) - prevents mist relay from rapid cycling
+MUSHPI_HUMIDITY_HYSTERESIS=3.0
+
+# CO2 hysteresis (ppm) - prevents fan from rapid cycling
+MUSHPI_CO2_HYSTERESIS=100.0
+
+# Light verification thresholds
+# Raw ADC value threshold to consider light as "ON"
+MUSHPI_LIGHT_ON_THRESHOLD=200.0
+
+# Raw ADC value threshold to consider light as "OFF"
+MUSHPI_LIGHT_OFF_THRESHOLD=50.0
+
+# Delay (seconds) after light state change before verification
+MUSHPI_LIGHT_VERIFICATION_DELAY=30.0
+
+# -----------------------------------------------------------------------------
+# Bluetooth Configuration
+# -----------------------------------------------------------------------------
+# BLE GATT Service UUID (custom service for environmental control)
+MUSHPI_BLE_SERVICE_UUID=12345678-1234-5678-1234-56789abcdef0
+
+# BLE advertising name prefix (will append species+stage, e.g., "MushPi-OysterPinning")
+MUSHPI_BLE_NAME_PREFIX=MushPi
+
+# -----------------------------------------------------------------------------
+# Logging Configuration
+# -----------------------------------------------------------------------------
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+MUSHPI_LOG_LEVEL=INFO
+
+# Log file path (leave empty for console-only logging)
+# Example: /opt/mushpi/logs/mushpi.log
+MUSHPI_LOG_FILE=
+
+# Maximum log file size in MB before rotation
+MUSHPI_LOG_MAX_SIZE=10
+
+# Number of rotated log files to keep
+MUSHPI_LOG_BACKUP_COUNT=5
+
+# -----------------------------------------------------------------------------
+# Development & Testing Modes
+# -----------------------------------------------------------------------------
+# Simulation mode: Simulates GPIO and sensors (for testing without hardware)
+# Set to true for development on non-Pi systems, false for production on Pi
+MUSHPI_SIMULATION_MODE=false
+
+# Debug mode: Enable verbose debug logging
+MUSHPI_DEBUG_MODE=false
+
+# Test mode: Enable test-specific behaviors
+MUSHPI_TEST_MODE=false
+
+# -----------------------------------------------------------------------------
+# Configuration Files
+# -----------------------------------------------------------------------------
+# Path to thresholds.json (can be relative to APP_DIR or absolute)
+MUSHPI_THRESHOLDS_PATH=config/thresholds.json
+
+# =============================================================================
+# Deployment-Specific Examples
+# =============================================================================
+#
+# FOR RASPBERRY PI PRODUCTION:
+# - Set all paths to /opt/mushpi
+# - Set SIMULATION_MODE=false
+# - Set DEBUG_MODE=false
+# - Verify GPIO pin numbers match your wiring
+# - Check RELAY_ACTIVE_HIGH matches your relay board (usually false)
+#
+# FOR LOCAL DEVELOPMENT (Mac/Linux/Windows):
+# - Set paths to your local workspace (e.g., ~/dev/mush/mushpi)
+# - Set SIMULATION_MODE=true
+# - Set DEBUG_MODE=true
+# - GPIO operations will be logged instead of executed
+#
+# =============================================================================

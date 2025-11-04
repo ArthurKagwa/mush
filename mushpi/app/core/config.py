@@ -162,7 +162,9 @@ class ConfigurationManager:
                     line = line.strip()
                     if line and not line.startswith('#') and '=' in line:
                         key, value = line.split('=', 1)
-                        os.environ.setdefault(key.strip(), value.strip())
+                        # Strip inline comments from value (e.g., "17 # GPIO 17...")
+                        value = value.split('#', 1)[0].strip()
+                        os.environ.setdefault(key.strip(), value)
         else:
             logger.info("No .env file found, using system environment variables only")
             

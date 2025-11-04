@@ -11,7 +11,8 @@ import time
 from typing import Optional, Dict, Any, Callable, Set
 
 try:
-    from bluezero import adapter, peripheral
+    from bluezero import adapter
+    from bluezero import localGATT
     BLE_AVAILABLE = True
 except ImportError:
     BLE_AVAILABLE = False
@@ -91,8 +92,9 @@ class BLEGATTServiceManager:
             return
             
         try:
-            # Create main service
-            self.service = peripheral.Service(
+            # Create main GATT service using localGATT
+            self.service = localGATT.Service(
+                1,  # Service ID
                 self.config.bluetooth.service_uuid,
                 True  # Primary service
             )
@@ -156,13 +158,16 @@ class BLEGATTServiceManager:
             # Start advertising with dynamic name
             advertising_name = self._get_advertising_name()
             
-            # Start BLE peripheral advertising
+            # Configure adapter for advertising
+            self.adapter.powered = True
             self.adapter.discoverable = True
             self.adapter.alias = advertising_name
             
-            # Register service
+            # Register service if available
             if self.service:
-                self.service.register()
+                # BlueZero automatically handles service registration
+                # Just need to ensure service is published
+                pass
             
             self._running = True
             self.start_time = time.time()
@@ -182,13 +187,13 @@ class BLEGATTServiceManager:
             return
             
         try:
+            # Stop GATT application
+            if hasattr(self, 'app') and self.app:
+                self.app.stop()
+                
             if self.adapter:
                 # Stop advertising
                 self.adapter.discoverable = False
-                
-                # Unregister service
-                if self.service:
-                    self.service.unregister()
                     
             logger.info("BLE GATT service stopped")
             

@@ -6,11 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=${MUSHPI_APP_DIR:-/opt/mushpi/app}
-ExecStart=${MUSHPI_VENV_PATH:-/opt/mushpi/.venv}/bin/python -u ${MUSHPI_APP_DIR:-/opt/mushpi/app}/main.py
+WorkingDirectory=${MUSHPI_APP_DIR:-/opt/mushpi}
+ExecStart=${MUSHPI_VENV_PATH:-/opt/mushpi/venv}/bin/python -u ${MUSHPI_APP_DIR:-/opt/mushpi}/main.py
 EnvironmentFile=-/opt/mushpi/.env
-EnvironmentFile=-/opt/mushpi/app/.env
-Environment=PYTHONPATH=${MUSHPI_APP_DIR:-/opt/mushpi/app}
+Environment=PYTHONPATH=${MUSHPI_APP_DIR:-/opt/mushpi}
 Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
 RestartSec=3
