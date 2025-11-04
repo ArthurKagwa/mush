@@ -1,7 +1,7 @@
 ---
 applyTo: '**'
 ---
-
+- NO MOCK DATA SHALL BE USED IN THE PROJECT
 - read the baseline and readme files
 - read entire project structure
 - update baseline after changes

@@ -1,0 +1,62 @@
+name: mushpi_hub
+description: Mobile controller for MushPi mushroom cultivation system
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: ">=3.13.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # State Management (single source of truth)
+  flutter_riverpod: ^2.4.9
+  riverpod_annotation: ^2.3.3
+  
+  # BLE Communication
+  flutter_blue_plus: ^1.32.0
+  
+  # Navigation
+  go_router: ^12.1.1
+  
+  # Database (type-safe, auto-migrations)
+  drift: ^2.14.0
+  sqlite3_flutter_libs: ^0.5.0
+  path_provider: ^2.1.1
+  path: ^1.8.3
+  
+  # Data Models (immutable, code generation)
+  freezed_annotation: ^2.4.1
+  json_annotation: ^4.8.1
+  
+  # UI
+  fl_chart: ^0.65.0
+  google_fonts: ^6.1.0
+  
+  # Utils
+  hooks_riverpod: ^2.4.9
+  flutter_hooks: ^0.20.3
+  uuid: ^4.2.1
+  intl: ^0.19.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+  
+  # Code Generation
+  build_runner: ^2.4.7
+  riverpod_generator: ^2.3.9
+  drift_dev: ^2.14.0
+  freezed: ^2.4.6
+  json_serializable: ^6.7.1
+  
+  # Testing
+  mockito: ^5.4.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/

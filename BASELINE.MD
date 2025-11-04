@@ -1,11 +1,203 @@
 # MushPi Project Progress Tracker
 
-## rules
+## Rules
 - read readme
 - update baseline after each iteration
 - stick to task at hand
+- **STACK APPROACH**: Latest entries first (reverse chronological order)
+
+---
+
+## 📋 CURRENT PENDING TASKS (Stack Order - Top Priority First)
+
+### Flutter Mobile App - Phase 1 (Week 1) 🔄 IN PROGRESS
+
+**Immediate Actions Required:**
+1. ⏳ **Install Flutter SDK** (if not available) - Blocking all development
+2. ⏳ **Run `flutter pub get`** - Install dependencies
+3. ⏳ **Run `build_runner`** - Generate Freezed/Drift code
+
+**Next Implementation Tasks:**
+4. ⏳ **Complete DAOs** (4 files)
+   - HarvestsDao - harvest operations
+   - ReadingsDao - sensor data queries
+   - DevicesDao - BLE device management
+   - SettingsDao - configuration storage
+
+5. ⏳ **Implement Repositories** (3 files)
+   - BLERepository - device scanning, connection, read/write
+   - FarmRepository - farm CRUD with database
+   - AnalyticsRepository - metrics calculations
+
+6. ⏳ **Create Riverpod Providers** (6 files)
+   - database_provider, farms_provider, current_farm_provider
+   - analytics_provider, ble_provider, app_state_provider
+
+7. ⏳ **Build UI Layer**
+   - Material Design 3 theme (light/dark)
+   - Initial screens (splash, home, scan, detail, settings)
+   - Core widgets (farm cards, charts, indicators)
+
+**Estimated Completion:** End of Week 1 (Nov 8, 2025)
+
+### Python Backend - Maintenance ✅ STABLE
+
+**No Pending Tasks** - All systems operational:
+- ✅ BLE GATT service fully modularized
+- ✅ Sensor management complete
+- ✅ Control system operational
+- ✅ Stage management implemented
+- ✅ Configuration system deployed
+
+---
 
 ## Progress Log
+
+**Note:** All entries below are in reverse chronological order (newest entries at top)
+
+---
+
+### 2025-11-04 - Flutter App Phase 1 Foundation Started 🔄
+**Status:** Foundation layer implementation in progress
+**Task Duration:** In progress
+**Completed:**
+- ✅ **Flutter Project Structure** - Complete directory hierarchy matching FLUTTER_APP_PLAN.MD
+  - Created 11 directories: core/constants, core/theme, core/utils, data/models, data/database/daos, data/database/tables, data/repositories, providers, screens, widgets
+  - Initialized Flutter project at `flutter/mushpi_hub`
+  - Created assets directory structure
+
+- ✅ **Production Dependencies** - All required packages configured in pubspec.yaml
+  - State Management: flutter_riverpod (2.4.9), riverpod_annotation (2.3.3), hooks_riverpod (2.4.9)
+  - BLE Communication: flutter_blue_plus (1.32.0)
+  - Database: drift (2.14.0), sqlite3_flutter_libs (0.5.0), path_provider (2.1.1)
+  - Data Models: freezed_annotation (2.4.1), json_annotation (4.8.1)
+  - Navigation: go_router (12.1.1)
+  - Charts: fl_chart (0.65.0)
+  - UI: google_fonts (6.1.0)
+  - Code Generation: build_runner (2.4.7), riverpod_generator (2.3.9), drift_dev (2.14.0), freezed (2.4.6), json_serializable (6.7.1)
+
+- ✅ **BLE Constants Implementation** - Exact match with Python backend
+  - File: `lib/core/constants/ble_constants.dart` (200+ lines)
+  - Service UUID: `12345678-1234-5678-1234-56789abcdef0`
+  - 5 Characteristic UUIDs: env_measurements, control_targets, stage_state, override_bits, status_flags
+  - Enums: LightMode (0=OFF, 1=ON, 2=CYCLE), ControlMode (0=FULL, 1=SEMI, 2=MANUAL)
+  - Species enum: Oyster(1), Shiitake(2), Lion's Mane(3), Custom(99)
+  - GrowthStage enum: Incubation(1), Pinning(2), Fruiting(3)
+  - Bit flags: OverrideBits, StatusFlags
+  - Advertising name parsing: `MushPi-<species><stage>` format
+
+- ✅ **BLE Data Serialization** - Binary packing/unpacking utilities
+  - File: `lib/core/utils/ble_serializer.dart` (300+ lines)
+  - Little-endian byte order (matching Python struct format)
+  - `parseEnvironmentalData()`: 12 bytes → CO₂, temp×10, RH×10, light, uptime
+  - `serializeControlTargets()` / `parseControlTargets()`: 15 bytes ↔ thresholds
+  - `serializeStageState()` / `parseStageState()`: 10 bytes ↔ mode, species, stage, timestamp
+  - `serializeOverrideBits()`: 2 bytes → relay control bitfield
+  - `parseStatusFlags()`: 4 bytes → system status bitfield
+  - Data classes: EnvironmentalReading, ControlTargetsData, StageStateData
+  - Comprehensive validation and error handling
+
+- ✅ **Freezed Data Models** - Immutable data classes for type safety
+  - File: `lib/data/models/farm.dart` (120+ lines)
+    - `Farm`: Core farm entity (id, name, deviceId, location, notes, createdAt, lastActive, totalHarvests, totalYieldKg, primarySpecies, imageUrl, isActive, metadata)
+    - `FarmAnalytics`: Performance metrics (environmental compliance %, production metrics, stage tracking, system health)
+    - `HarvestRecord`: Production tracking (yieldKg, flushNumber, qualityScore, notes, photoUrls)
+    - `CrossFarmComparison`: Multi-farm analytics (averages, top/bottom performers, species breakdown)
+    - `DeviceInfo`: BLE device metadata
+  - File: `lib/data/models/threshold_profile.dart` (90+ lines)
+    - `ThresholdProfile`: Per-stage environmental targets
+    - `FarmThresholds`: Farm-specific threshold configurations
+    - `EnvironmentalData`: Sensor reading data
+    - `ControlTargets`: Control parameters
+    - `StageState`: Growth stage information
+    - `ConnectionStatus` enum
+
+- ✅ **Drift Database Schema** - Type-safe SQL database
+  - File: `lib/data/database/tables/tables.dart` (70+ lines)
+  - 5 Tables defined:
+    - **Farms**: Primary farm data with one-to-one device binding
+    - **Harvests**: Production records with foreign key to Farms
+    - **Devices**: BLE device registry with optional farm link
+    - **Readings**: Time-series environmental data linked to farms
+    - **Settings**: Key-value configuration storage
+  - Proper foreign key relationships
+  - Default values and constraints
+  - Auto-increment and timestamp columns
+
+- ✅ **Main Database File** - Drift database coordinator
+  - File: `lib/data/database/app_database.dart` (30+ lines)
+  - Database: `mushpi.db` stored in app documents directory
+  - Schema version: 1
+  - Lazy initialization with path_provider
+  - Ready for DAO integration
+
+- ✅ **Farms DAO Started** - Farm CRUD operations
+  - File: `lib/data/database/daos/farms_dao.dart` (80+ lines)
+  - Methods: getAllFarms(), getActiveFarms(), getFarmById(), getFarmByDeviceId()
+  - Methods: insertFarm(), updateFarm(), updateLastActive(), updateProductionMetrics()
+  - Methods: setFarmActive(), deleteFarm(), linkDeviceToFarm()
+
+- ✅ **Flutter Baseline Documentation** - Comprehensive progress tracking
+  - File: `flutter/mushpi_hub/FLUTTER_BASELINE.md` (400+ lines)
+  - Complete Phase 1 status and task breakdown
+  - BLE protocol specifications
+  - Database schema documentation
+  - File inventory with status indicators
+  - Integration notes with Python backend
+  - Next session priorities
+
+**Technical Specifications:**
+```dart
+// BLE Service Architecture
+Service UUID: 12345678-1234-5678-1234-56789abcdef0
+
+Characteristics:
+1. Environmental (12 bytes): u16 CO₂, s16 temp×10, u16 RH×10, u16 light, u32 uptime
+2. Control (15 bytes): s16 tempMin×10, s16 tempMax×10, u16 RHmin×10, u16 CO₂max, 
+                       u8 lightMode, u16 onMin, u16 offMin, u16 reserved
+3. Stage (10 bytes): u8 mode, u8 species, u8 stage, u32 timestamp, u16 expectedDays, u8 reserved
+4. Override (2 bytes): u16 relay bitfield
+5. Status (4 bytes): u32 status bitfield
+
+All data: Little-endian byte order
+```
+
+**Database Schema:**
+```sql
+Farms: id, name, deviceId (UNIQUE), location, notes, createdAt, lastActive, 
+       totalHarvests, totalYieldKg, primarySpecies, imageUrl, isActive, metadata
+
+Harvests: id, farmId (FK), harvestDate, species, stage, yieldKg, flushNumber, 
+          qualityScore, notes, photoUrls, metadata
+
+Devices: deviceId, name, address, farmId (FK), lastConnected
+
+Readings: id, farmId (FK), timestamp, co2Ppm, temperatureC, relativeHumidity, lightRaw
+
+Settings: key, value, updatedAt
+```
+
+**Next Tasks:**
+- [ ] Complete remaining DAOs (Harvests, Readings, Devices, Settings)
+- [ ] Run `flutter pub get` to install dependencies
+- [ ] Run `build_runner` to generate Freezed and Drift code
+- [ ] Implement BLE repository with flutter_blue_plus
+- [ ] Create farm repository with database integration
+- [ ] Implement analytics repository for farm metrics
+- [ ] Create Riverpod providers (database, farms, analytics, BLE, app state)
+- [ ] Build Material Design 3 theme
+- [ ] Implement initial screens (splash, home, device scan)
+
+**Architecture Decisions:**
+- **Single Source of Truth**: Riverpod providers manage all app state
+- **Type Safety**: Freezed for immutable models, Drift for type-safe SQL
+- **Offline-First**: All data persists locally, works without BLE connection
+- **No Mock Data**: Production-ready implementations only
+- **Backward Compatible**: 100% compatible with existing MushPi Python BLE backend
+
+**TASK IN PROGRESS** 🔄 - Phase 1 Foundation (Week 1)
+
+---
 
 ### 2025-11-04 - Automation Levels & Species Management Implementation ✅
 **Status:** Comprehensive automation and threshold management system
