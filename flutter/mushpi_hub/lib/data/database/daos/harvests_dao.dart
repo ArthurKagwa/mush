@@ -6,7 +6,7 @@ part 'harvests_dao.g.dart';
 
 @DriftAccessor(tables: [Harvests])
 class HarvestsDao extends DatabaseAccessor<AppDatabase> with _$HarvestsDaoMixin {
-  HarvestsDao(AppDatabase db) : super(db);
+  HarvestsDao(super.db);
 
   /// Get all harvests
   Future<List<Harvest>> getAllHarvests() => select(harvests).get();

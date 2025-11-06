@@ -7,7 +7,7 @@ part 'farms_dao.g.dart';
 /// Data Access Object for Farms table
 @DriftAccessor(tables: [Farms])
 class FarmsDao extends DatabaseAccessor<AppDatabase> with _$FarmsDaoMixin {
-  FarmsDao(AppDatabase db) : super(db);
+  FarmsDao(super.db);
 
   /// Get all farms
   Future<List<Farm>> getAllFarms() {

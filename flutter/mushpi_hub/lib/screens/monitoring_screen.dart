@@ -1,0 +1,819 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+
+import '../providers/farms_provider.dart';
+import '../providers/current_farm_provider.dart';
+import '../data/models/farm.dart';
+
+/// Monitoring screen showing real-time environmental data and system status.
+///
+/// Displays:
+/// - Real-time environmental metrics across all farms
+/// - System alerts and notifications
+/// - Compliance indicators
+/// - Quick action buttons
+/// - Environmental trend charts
+class MonitoringScreen extends ConsumerStatefulWidget {
+  const MonitoringScreen({super.key});
+
+  @override
+  ConsumerState<MonitoringScreen> createState() => _MonitoringScreenState();
+}
+
+class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // Start auto-refresh when screen is shown
+    _startAutoRefresh();
+  }
+
+  @override
+  void dispose() {
+    _stopAutoRefresh();
+    super.dispose();
+  }
+
+  void _startAutoRefresh() {
+    // Refresh every 30 seconds
+    Future.delayed(const Duration(seconds: 30), () {
+      if (mounted) {
+        ref.invalidate(selectedMonitoringFarmLatestReadingProvider);
+        _startAutoRefresh();
+      }
+    });
+  }
+
+  void _stopAutoRefresh() {
+    // The mounted check in _startAutoRefresh will prevent further refreshes
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final farmsAsync = ref.watch(activeFarmsProvider);
+    final selectedFarmId = ref.watch(selectedMonitoringFarmIdProvider);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Monitoring'),
+        actions: [
+          // Refresh button
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () => ref.refresh(activeFarmsProvider.future),
+            tooltip: 'Refresh',
+          ),
+        ],
+      ),
+      body: farmsAsync.when(
+        data: (farms) {
+          if (farms.isEmpty) {
+            return _EmptyMonitoringView(
+              onAddFarm: () => context.push('/farms/scan'),
+            );
+          }
+
+          // If multiple farms and no farm selected, show farm selector
+          if (farms.length > 1 && selectedFarmId == null) {
+            return _FarmSelectorView(
+              farms: farms,
+              onSelectFarm: (farmId) {
+                ref.read(selectedMonitoringFarmIdProvider.notifier).state = farmId;
+              },
+            );
+          }
+
+          // If single farm and no selection, auto-select it
+          if (farms.length == 1 && selectedFarmId == null) {
+            // Auto-select the only farm
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              ref.read(selectedMonitoringFarmIdProvider.notifier).state = farms.first.id;
+            });
+          }
+
+          // Find the selected farm
+          final selectedFarm = selectedFarmId != null
+              ? farms.firstWhere(
+                  (f) => f.id == selectedFarmId,
+                  orElse: () => farms.first,
+                )
+              : farms.first;
+
+          return RefreshIndicator(
+            onRefresh: () => ref.refresh(activeFarmsProvider.future),
+            child: CustomScrollView(
+              slivers: [
+                // Farm selector dropdown (if multiple farms)
+                if (farms.length > 1)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: _FarmDropdownSelector(
+                        farms: farms,
+                        selectedFarmId: selectedFarmId,
+                        onChanged: (farmId) {
+                          ref.read(selectedMonitoringFarmIdProvider.notifier).state = farmId;
+                        },
+                      ),
+                    ),
+                  ),
+
+                // System status for selected farm
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: _FarmStatusCard(farm: selectedFarm),
+                  ),
+                ),
+
+                // Environmental overview for selected farm
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                    child: _EnvironmentalOverviewCard(farm: selectedFarm),
+                  ),
+                ),
+
+                const SliverToBoxAdapter(child: SizedBox(height: 16)),
+
+                // Farm details
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                    child: Text(
+                      'Farm Details',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  ),
+                ),
+
+                const SliverToBoxAdapter(child: SizedBox(height: 8)),
+
+                // Farm info card
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                    child: _FarmInfoCard(
+                      farm: selectedFarm,
+                      onViewDetails: () => context.push('/farm/${selectedFarm.id}'),
+                    ),
+                  ),
+                ),
+
+                const SliverToBoxAdapter(
+                  child: SizedBox(height: 80), // Bottom padding
+                ),
+              ],
+            ),
+          );
+        },
+        loading: () => const Center(
+          child: CircularProgressIndicator(),
+        ),
+        error: (error, stack) => Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                Icons.error_outline,
+                size: 64,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Error loading monitoring data',
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                error.toString(),
+                style: Theme.of(context).textTheme.bodyMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: () => ref.invalidate(activeFarmsProvider),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Farm selector view shown when no farm is selected
+class _FarmSelectorView extends StatelessWidget {
+  const _FarmSelectorView({
+    required this.farms,
+    required this.onSelectFarm,
+  });
+
+  final List<Farm> farms;
+  final ValueChanged<String> onSelectFarm;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.monitor_heart_outlined,
+              size: 80,
+              color: Theme.of(context).colorScheme.primary.withOpacity(0.5),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Select a Farm to Monitor',
+              style: Theme.of(context).textTheme.headlineMedium,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Choose which farm you want to monitor',
+              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 32),
+            ...farms.map((farm) => Padding(
+                  padding: const EdgeInsets.only(bottom: 12.0),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () => onSelectFarm(farm.id),
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.all(16),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  farm.name,
+                                  style: Theme.of(context).textTheme.titleMedium,
+                                ),
+                                if (farm.location != null) ...[
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    farm.location!,
+                                    style: Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right),
+                        ],
+                      ),
+                    ),
+                  ),
+                )),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Farm dropdown selector
+class _FarmDropdownSelector extends StatelessWidget {
+  const _FarmDropdownSelector({
+    required this.farms,
+    required this.selectedFarmId,
+    required this.onChanged,
+  });
+
+  final List<Farm> farms;
+  final String? selectedFarmId;
+  final ValueChanged<String?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+        child: Row(
+          children: [
+            Icon(
+              Icons.agriculture,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: DropdownButton<String>(
+                value: selectedFarmId,
+                isExpanded: true,
+                underline: const SizedBox(),
+                hint: const Text('Select a farm'),
+                items: farms.map((farm) {
+                  return DropdownMenuItem<String>(
+                    value: farm.id,
+                    child: Text(farm.name),
+                  );
+                }).toList(),
+                onChanged: onChanged,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Farm status card for single farm
+class _FarmStatusCard extends StatelessWidget {
+  const _FarmStatusCard({required this.farm});
+
+  final Farm farm;
+
+  bool get isOnline {
+    if (farm.lastActive == null) return false;
+    return DateTime.now().difference(farm.lastActive!).inMinutes < 30;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Status',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: isOnline ? Colors.green.withOpacity(0.2) : Colors.grey.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: isOnline ? Colors.green : Colors.grey,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        isOnline ? 'Online' : 'Offline',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: isOnline ? Colors.green : Colors.grey,
+                              fontWeight: FontWeight.bold,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: _StatusItem(
+                    icon: Icons.eco,
+                    label: 'Total Harvests',
+                    value: farm.totalHarvests.toString(),
+                    color: colorScheme.primary,
+                  ),
+                ),
+                Container(
+                  width: 1,
+                  height: 40,
+                  color: colorScheme.outlineVariant,
+                ),
+                Expanded(
+                  child: _StatusItem(
+                    icon: Icons.scale,
+                    label: 'Total Yield',
+                    value: '${farm.totalYieldKg.toStringAsFixed(1)} kg',
+                    color: colorScheme.tertiary,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Farm info card with view details button
+class _FarmInfoCard extends StatelessWidget {
+  const _FarmInfoCard({
+    required this.farm,
+    required this.onViewDetails,
+  });
+
+  final Farm farm;
+  final VoidCallback onViewDetails;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              farm.name,
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            if (farm.location != null) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(
+                    Icons.location_on,
+                    size: 16,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    farm.location!,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                  ),
+                ],
+              ),
+            ],
+            if (farm.notes != null && farm.notes!.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                farm.notes!,
+                style: Theme.of(context).textTheme.bodyMedium,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: onViewDetails,
+                icon: const Icon(Icons.visibility),
+                label: const Text('View Full Details'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Empty state when no farms exist
+class _EmptyMonitoringView extends StatelessWidget {
+  const _EmptyMonitoringView({required this.onAddFarm});
+
+  final VoidCallback onAddFarm;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.monitor_outlined,
+              size: 120,
+              color: Theme.of(context).colorScheme.primary.withOpacity(0.5),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'No Active Monitoring',
+              style: Theme.of(context).textTheme.headlineMedium,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Add your first farm to start monitoring environmental conditions.',
+              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 32),
+            ElevatedButton.icon(
+              onPressed: onAddFarm,
+              icon: const Icon(Icons.add),
+              label: const Text('Add Farm'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 32,
+                  vertical: 16,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Environmental overview card for single farm
+class _EnvironmentalOverviewCard extends ConsumerWidget {
+  const _EnvironmentalOverviewCard({required this.farm});
+
+  final Farm farm;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Watch the latest reading for the selected farm
+    final readingAsync = ref.watch(selectedMonitoringFarmLatestReadingProvider);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Environmental Data',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                readingAsync.when(
+                  data: (reading) => reading != null
+                      ? _TimestampChip(timestamp: reading.timestamp)
+                      : const SizedBox.shrink(),
+                  loading: () => const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  error: (_, __) => const SizedBox.shrink(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            readingAsync.when(
+              data: (reading) {
+                if (reading == null) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Text(
+                        'No sensor data available',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            ),
+                      ),
+                    ),
+                  );
+                }
+
+                return Column(
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _EnvironmentalMetric(
+                            icon: Icons.thermostat,
+                            label: 'Temperature',
+                            value: '${reading.temperatureC.toStringAsFixed(1)}°C',
+                            color: _getTemperatureColor(reading.temperatureC),
+                          ),
+                        ),
+                        Expanded(
+                          child: _EnvironmentalMetric(
+                            icon: Icons.water_drop,
+                            label: 'Humidity',
+                            value: '${reading.relativeHumidity.toStringAsFixed(0)}%',
+                            color: _getHumidityColor(reading.relativeHumidity),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _EnvironmentalMetric(
+                            icon: Icons.air,
+                            label: 'CO₂',
+                            value: '${reading.co2Ppm} ppm',
+                            color: _getCO2Color(reading.co2Ppm),
+                          ),
+                        ),
+                        Expanded(
+                          child: _EnvironmentalMetric(
+                            icon: Icons.light_mode,
+                            label: 'Light',
+                            value: reading.lightRaw.toString(),
+                            color: Colors.amber,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                );
+              },
+              loading: () => const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32.0),
+                  child: CircularProgressIndicator(),
+                ),
+              ),
+              error: (error, stack) => Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text(
+                    'Error loading sensor data',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color _getTemperatureColor(double temp) {
+    if (temp < 15) return Colors.blue;
+    if (temp > 28) return Colors.red;
+    return Colors.orange;
+  }
+
+  Color _getHumidityColor(double rh) {
+    if (rh < 60) return Colors.orange;
+    if (rh > 95) return Colors.red;
+    return Colors.blue;
+  }
+
+  Color _getCO2Color(int co2) {
+    if (co2 > 2000) return Colors.red;
+    if (co2 > 1000) return Colors.orange;
+    return Colors.green;
+  }
+}
+
+/// Timestamp chip showing when data was last updated
+class _TimestampChip extends StatelessWidget {
+  const _TimestampChip({required this.timestamp});
+
+  final DateTime timestamp;
+
+  String _getTimeAgo() {
+    final now = DateTime.now();
+    final difference = now.difference(timestamp);
+
+    if (difference.inSeconds < 60) {
+      return 'Just now';
+    } else if (difference.inMinutes < 60) {
+      return '${difference.inMinutes}m ago';
+    } else if (difference.inHours < 24) {
+      return '${difference.inHours}h ago';
+    } else {
+      return '${difference.inDays}d ago';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isRecent = DateTime.now().difference(timestamp).inMinutes < 5;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: isRecent
+            ? Colors.green.withOpacity(0.2)
+            : Colors.grey.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.schedule,
+            size: 14,
+            color: isRecent ? Colors.green : Colors.grey,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            _getTimeAgo(),
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: isRecent ? Colors.green : Colors.grey,
+                  fontWeight: FontWeight.bold,
+                ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Individual status item
+class _StatusItem extends StatelessWidget {
+  const _StatusItem({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Icon(icon, color: color, size: 32),
+        const SizedBox(height: 8),
+        Text(
+          value,
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                color: color,
+                fontWeight: FontWeight.bold,
+              ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      ],
+    );
+  }
+}
+
+/// Environmental metric display
+class _EnvironmentalMetric extends StatelessWidget {
+  const _EnvironmentalMetric({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, color: color, size: 24),
+        const SizedBox(width: 8),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            Text(
+              value,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}

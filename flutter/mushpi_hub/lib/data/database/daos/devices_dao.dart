@@ -6,7 +6,7 @@ part 'devices_dao.g.dart';
 
 @DriftAccessor(tables: [Devices])
 class DevicesDao extends DatabaseAccessor<AppDatabase> with _$DevicesDaoMixin {
-  DevicesDao(AppDatabase db) : super(db);
+  DevicesDao(super.db);
 
   /// Get all devices
   Future<List<Device>> getAllDevices() => select(devices).get();
