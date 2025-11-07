@@ -1,5 +1,6 @@
 // lib/providers/ble_provider.dart
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:mushpi_hub/data/repositories/ble_repository.dart';
@@ -245,11 +246,13 @@ final bleOperationsProvider = Provider<BLEOperations>((ref) {
   final bleRepository = ref.watch(bleRepositoryProvider);
   final devicesDao = ref.watch(devicesDaoProvider);
   final readingsDao = ref.watch(readingsDaoProvider);
+  final settingsDao = ref.watch(settingsDaoProvider);
   
   return BLEOperations(
     repository: bleRepository,
     devicesDao: devicesDao,
     readingsDao: readingsDao,
+    settingsDao: settingsDao,
   );
 });
 
@@ -261,11 +264,13 @@ class BLEOperations {
     required this.repository,
     required this.devicesDao,
     required this.readingsDao,
+    required this.settingsDao,
   });
 
   final BLERepository repository;
   final dynamic devicesDao; // DevicesDao
   final dynamic readingsDao; // ReadingsDao
+  final dynamic settingsDao; // SettingsDao
 
   /// Check if Bluetooth is available on this device
   Future<bool> isBluetoothAvailable() async {
@@ -308,25 +313,49 @@ class BLEOperations {
   /// [farmId] - Optional farm ID to associate with this device
   Future<void> connect(BluetoothDevice device, {String? farmId}) async {
     try {
+      debugPrint('🔗 [BLEOperations] Connecting to device: ${device.platformName} (${device.remoteId})');
       developer.log(
         'Connecting to device: ${device.platformName} (${device.remoteId})',
         name: 'mushpi.providers.ble.ops',
       );
 
+      // IMPORTANT: Save device info BEFORE attempting connection
+      // This ensures auto-reconnect will work even if connection fails
+      final deviceId = device.remoteId.toString();
+      final deviceAddress = device.remoteId.toString();
+      
+      debugPrint('💾 [BLEOperations] Saving device info for auto-reconnect BEFORE connection...');
+      try {
+        await settingsDao.setLastConnectedDevice(
+          deviceId: deviceId,
+          address: deviceAddress,
+          farmId: farmId,
+        );
+        debugPrint('✅ [BLEOperations] Device info saved for auto-reconnect');
+      } catch (e) {
+        debugPrint('⚠️ [BLEOperations] Failed to save device info (non-critical): $e');
+        // Non-critical error, continue with connection
+      }
+
       // Connect via repository
+      debugPrint('🔗 [BLEOperations] Calling repository.connect()...');
       await repository.connect(device);
+      debugPrint('✅ [BLEOperations] Repository connected successfully');
 
       // Update device in database
-      final deviceId = device.remoteId.toString();
       final exists = await devicesDao.deviceExists(deviceId);
+
+      debugPrint('📝 [BLEOperations] Device exists in DB: $exists');
 
       if (exists) {
         // Update last connected timestamp
         await devicesDao.updateLastConnected(deviceId);
+        debugPrint('✅ [BLEOperations] Updated lastConnected timestamp');
         
         // Link to farm if farmId provided
         if (farmId != null) {
           await devicesDao.linkDeviceToFarm(deviceId, farmId);
+          debugPrint('✅ [BLEOperations] Linked device to farm: $farmId');
         }
       } else {
         // Insert new device record
@@ -336,13 +365,16 @@ class BLEOperations {
           address: device.remoteId.toString(),
           farmId: farmId,
         );
+        debugPrint('✅ [BLEOperations] Inserted new device record');
       }
 
+      debugPrint('✅ [BLEOperations] Successfully connected to device and updated database');
       developer.log(
         'Successfully connected to device',
         name: 'mushpi.providers.ble.ops',
       );
     } catch (error, stackTrace) {
+      debugPrint('❌ [BLEOperations] Failed to connect to device: $error');
       developer.log(
         'Failed to connect to device',
         name: 'mushpi.providers.ble.ops',

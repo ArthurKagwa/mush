@@ -58,6 +58,96 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
       appBar: AppBar(
         title: const Text('Monitoring'),
         actions: [
+          // Connection status indicator - shows selected farm's status
+          farmsAsync.when(
+            data: (farms) {
+              if (selectedFarmId == null || farms.isEmpty) {
+                return const SizedBox.shrink();
+              }
+              
+              final selectedFarm = farms.where((f) => f.id == selectedFarmId).firstOrNull;
+              if (selectedFarm == null) {
+                return const SizedBox.shrink();
+              }
+              
+              // Single source of truth: farm is online if lastActive < 1 minute
+              final isOnline = selectedFarm.lastActive != null &&
+                  DateTime.now().difference(selectedFarm.lastActive!).inMinutes < 1;
+              
+              return Padding(
+                padding: const EdgeInsets.only(right: 8.0),
+                child: Center(
+                  child: InkWell(
+                    onTap: () {
+                      // Show connection help dialog
+                      showDialog(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: Row(
+                            children: [
+                              Icon(
+                                isOnline ? Icons.check_circle : Icons.cancel,
+                                color: isOnline ? Colors.green : Colors.grey,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(isOnline ? 'Farm Online' : 'Farm Offline'),
+                            ],
+                          ),
+                          content: Text(
+                            isOnline
+                                ? '${selectedFarm.name} is online and actively reporting data.'
+                                : '${selectedFarm.name} is offline.\n\nTo reconnect:\n1. Go to Farms tab\n2. Tap the farm card\n3. Tap "Connect" button\n\nNote: Farm shows "Online" if it was active within the last 1 minute.',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.of(context).pop(),
+                              child: const Text('OK'),
+                            ),
+                            if (!isOnline)
+                              ElevatedButton(
+                                onPressed: () {
+                                  Navigator.of(context).pop();
+                                  context.go('/farms');
+                                },
+                                child: const Text('Go to Farms'),
+                              ),
+                          ],
+                        ),
+                      );
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: isOnline ? Colors.green : Colors.grey,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            isOnline ? Icons.check_circle : Icons.cancel,
+                            size: 16,
+                            color: Colors.white,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            isOnline ? 'Online' : 'Offline',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            },
+            loading: () => const SizedBox.shrink(),
+            error: (_, __) => const SizedBox.shrink(),
+          ),
           // Refresh button
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -126,6 +216,59 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
                     child: _FarmStatusCard(farm: selectedFarm),
                   ),
                 ),
+
+                // Reconnect banner if farm is offline
+                if (selectedFarm.lastActive == null || 
+                    DateTime.now().difference(selectedFarm.lastActive!).inMinutes >= 30)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Card(
+                        color: Colors.orange.shade50,
+                        child: Padding(
+                          padding: const EdgeInsets.all(16.0),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(Icons.warning_amber, color: Colors.orange.shade700),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      'Not Connected',
+                                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                        color: Colors.orange.shade900,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                'Your MushPi is offline. Showing last known data. Real-time updates paused.',
+                                style: TextStyle(color: Colors.orange.shade900),
+                              ),
+                              const SizedBox(height: 12),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton.icon(
+                                  onPressed: () => context.push('/farms/scan'),
+                                  icon: const Icon(Icons.refresh),
+                                  label: const Text('Reconnect Device'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.orange.shade700,
+                                    foregroundColor: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
 
                 // Environmental overview for selected farm
                 SliverToBoxAdapter(
@@ -340,7 +483,7 @@ class _FarmStatusCard extends StatelessWidget {
 
   bool get isOnline {
     if (farm.lastActive == null) return false;
-    return DateTime.now().difference(farm.lastActive!).inMinutes < 30;
+    return DateTime.now().difference(farm.lastActive!).inMinutes < 1;
   }
 
   @override

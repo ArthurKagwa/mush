@@ -11,6 +11,8 @@ import '../core/constants/ble_constants.dart';
 import '../core/utils/permission_handler.dart';
 import '../providers/ble_provider.dart';
 import '../providers/farms_provider.dart';
+import '../providers/database_provider.dart';
+import '../providers/auto_reconnect_provider.dart';
 
 const _uuid = Uuid();
 
@@ -123,7 +125,7 @@ class _DeviceScanScreenState extends ConsumerState<DeviceScanScreen> {
       await _startScanning();
     } else if (created == true && mounted) {
       // Navigate back to home on success
-      context.go('/home');
+      context.go('/farms');
     }
   }
 
@@ -191,16 +193,26 @@ class _DeviceScanScreenState extends ConsumerState<DeviceScanScreen> {
       return _buildEmptyState();
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: results.length,
-      itemBuilder: (context, index) {
-        final result = results[index];
-        return _DeviceListItem(
-          result: result,
-          onTap: () => _onDeviceSelected(result),
-        );
-      },
+    return Column(
+      children: [
+        // Quick Reconnect Card
+        _QuickReconnectCard(),
+        
+        // Device List
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: results.length,
+            itemBuilder: (context, index) {
+              final result = results[index];
+              return _DeviceListItem(
+                result: result,
+                onTap: () => _onDeviceSelected(result),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 
@@ -491,6 +503,32 @@ class _FarmCreationDialogState extends ConsumerState<_FarmCreationDialog> {
         name: 'device_scan',
       );
 
+      // Automatically connect to the device after farm creation
+      developer.log(
+        '🔗 [_FarmCreationDialog] Connecting to device automatically...',
+        name: 'device_scan',
+      );
+      
+      try {
+        final bleOps = ref.read(bleOperationsProvider);
+        await bleOps.connect(widget.device, farmId: createdFarmId);
+        
+        developer.log(
+          '✅ [_FarmCreationDialog] Device connected successfully!',
+          name: 'device_scan',
+        );
+      } catch (connectError, stackTrace) {
+        developer.log(
+          '⚠️ [_FarmCreationDialog] Failed to connect to device (farm was still created)',
+          name: 'device_scan',
+          error: connectError,
+          stackTrace: stackTrace,
+          level: 900,
+        );
+        // Don't fail the whole operation if connection fails
+        // User can connect manually later
+      }
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -674,5 +712,142 @@ class _SpeciesChip extends StatelessWidget {
       onSelected: (_) => onSelected(),
       showCheckmark: false,
     );
+  }
+}
+
+/// Quick reconnect card for last connected device
+class _QuickReconnectCard extends ConsumerWidget {
+  const _QuickReconnectCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return FutureBuilder<bool>(
+      future: ref.read(settingsDaoProvider).hasLastConnectedDevice(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || snapshot.data == false) {
+          return const SizedBox.shrink();
+        }
+
+        return Card(
+          margin: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          color: Theme.of(context).colorScheme.primaryContainer,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      Icons.history,
+                      color: Theme.of(context).colorScheme.onPrimaryContainer,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      'Quick Reconnect',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            color: Theme.of(context).colorScheme.onPrimaryContainer,
+                            fontWeight: FontWeight.bold,
+                          ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Reconnect to your last connected device',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Theme.of(context).colorScheme.onPrimaryContainer.withOpacity(0.8),
+                      ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _ReconnectButton(),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Reconnect button with status
+class _ReconnectButton extends ConsumerWidget {
+  const _ReconnectButton();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final status = ref.watch(reconnectionStatusProvider);
+
+    return FilledButton.icon(
+      onPressed: status.state == ReconnectionState.connecting ||
+              status.state == ReconnectionState.scanning
+          ? null
+          : () async {
+              final autoReconnect = ref.read(autoReconnectServiceProvider);
+              final success = await autoReconnect.attemptReconnection();
+              
+              if (context.mounted) {
+                if (success) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Successfully reconnected!'),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                  context.go('/farms');
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        status.lastError ?? 'Failed to reconnect. Device may be out of range.',
+                      ),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                }
+              }
+            },
+      icon: _getIcon(status.state),
+      label: Text(_getLabel(status.state, status.attemptCount)),
+    );
+  }
+
+  Widget _getIcon(ReconnectionState state) {
+    switch (state) {
+      case ReconnectionState.scanning:
+      case ReconnectionState.connecting:
+        return const SizedBox(
+          width: 16,
+          height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+        );
+      case ReconnectionState.connected:
+        return const Icon(Icons.check_circle_outline);
+      case ReconnectionState.failed:
+        return const Icon(Icons.error_outline);
+      default:
+        return const Icon(Icons.sync);
+    }
+  }
+
+  String _getLabel(ReconnectionState state, int attemptCount) {
+    switch (state) {
+      case ReconnectionState.scanning:
+        return 'Scanning...';
+      case ReconnectionState.connecting:
+        return 'Connecting...';
+      case ReconnectionState.connected:
+        return 'Connected';
+      case ReconnectionState.failed:
+        return attemptCount > 0 ? 'Retry Reconnect' : 'Try Again';
+      default:
+        return 'Reconnect to Last Device';
+    }
   }
 }

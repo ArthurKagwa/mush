@@ -1,4 +1,5 @@
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart';
 import '../app_database.dart';
 import '../tables/tables.dart';
 
@@ -124,6 +125,15 @@ class SettingsDao extends DatabaseAccessor<AppDatabase> with _$SettingsDaoMixin 
   /// Chart time range (24h/7d/30d)
   static const String keyChartTimeRange = 'chart_time_range';
 
+  /// Last connected device ID
+  static const String keyLastConnectedDeviceId = 'last_connected_device_id';
+
+  /// Last connected device address
+  static const String keyLastConnectedDeviceAddress = 'last_connected_device_address';
+
+  /// Last connected farm ID
+  static const String keyLastConnectedFarmId = 'last_connected_farm_id';
+
   // === Convenience Methods for Common Settings ===
 
   /// Get last selected farm ID
@@ -181,4 +191,75 @@ class SettingsDao extends DatabaseAccessor<AppDatabase> with _$SettingsDaoMixin 
   /// Set chart time range
   Future<void> setChartTimeRange(String range) =>
       setValue(keyChartTimeRange, range);
+
+  // === Last Connected Device Methods ===
+
+  /// Get last connected device ID
+  Future<String?> getLastConnectedDeviceId() =>
+      getValue(keyLastConnectedDeviceId);
+
+  /// Set last connected device ID
+  Future<void> setLastConnectedDeviceId(String deviceId) =>
+      setValue(keyLastConnectedDeviceId, deviceId);
+
+  /// Get last connected device address
+  Future<String?> getLastConnectedDeviceAddress() =>
+      getValue(keyLastConnectedDeviceAddress);
+
+  /// Set last connected device address
+  Future<void> setLastConnectedDeviceAddress(String address) =>
+      setValue(keyLastConnectedDeviceAddress, address);
+
+  /// Get last connected farm ID
+  Future<String?> getLastConnectedFarmId() =>
+      getValue(keyLastConnectedFarmId);
+
+  /// Set last connected farm ID (for reconnection)
+  Future<void> setLastConnectedFarmId(String farmId) =>
+      setValue(keyLastConnectedFarmId, farmId);
+
+  /// Set all last connected device info at once
+  Future<void> setLastConnectedDevice({
+    required String deviceId,
+    required String address,
+    String? farmId,
+  }) async {
+    debugPrint('💾 [SettingsDao] Saving last connected device info...');
+    debugPrint('  Device ID: $deviceId');
+    debugPrint('  Address: $address');
+    debugPrint('  Farm ID: $farmId');
+    
+    final values = {
+      keyLastConnectedDeviceId: deviceId,
+      keyLastConnectedDeviceAddress: address,
+    };
+    
+    if (farmId != null) {
+      values[keyLastConnectedFarmId] = farmId;
+    }
+    
+    try {
+      await setMultipleValues(values);
+      debugPrint('✅ [SettingsDao] Device info saved to database successfully');
+    } catch (error, stackTrace) {
+      debugPrint('❌ [SettingsDao] Error saving device info: $error');
+      debugPrint('Stack trace: $stackTrace');
+      rethrow;
+    }
+  }
+
+  /// Clear all last connected device info
+  Future<void> clearLastConnectedDevice() async {
+    await deleteMultipleSettings([
+      keyLastConnectedDeviceId,
+      keyLastConnectedDeviceAddress,
+      keyLastConnectedFarmId,
+    ]);
+  }
+
+  /// Check if last connected device exists
+  Future<bool> hasLastConnectedDevice() async {
+    final deviceId = await getLastConnectedDeviceId();
+    return deviceId != null && deviceId.isNotEmpty;
+  }
 }

@@ -250,6 +250,27 @@ class FarmRepository {
     }
   }
 
+  /// Clear lastActive timestamp to mark farm as offline
+  Future<void> clearLastActive(String farmId) async {
+    try {
+      await _database.farmsDao.clearLastActive(farmId);
+
+      developer.log(
+        'Farm last active cleared: $farmId (marked as offline)',
+        name: 'FarmRepository',
+      );
+    } catch (e, stackTrace) {
+      developer.log(
+        'Failed to clear farm last active',
+        name: 'FarmRepository',
+        error: e,
+        stackTrace: stackTrace,
+        level: 900,
+      );
+      // Don't rethrow - this is a non-critical operation
+    }
+  }
+
   // ========================
   // PRODUCTION METRICS
   // ========================

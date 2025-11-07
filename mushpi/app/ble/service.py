@@ -17,6 +17,17 @@ try:
 except ImportError:
     BLE_AVAILABLE = False
 
+# Always try to import dbus (even if BlueZero is available, we use it for advertising)
+try:
+    import dbus
+    import dbus.exceptions
+    import dbus.mainloop.glib
+    import dbus.service
+    from gi.repository import GLib
+    DBUS_AVAILABLE = True
+except Exception:
+    DBUS_AVAILABLE = False
+
 from ..core.config import config
 from ..models.ble_dataclasses import StatusFlags
 from .characteristics.environmental import EnvironmentalMeasurementsCharacteristic
@@ -51,8 +62,14 @@ class BLEGATTServiceManager:
         # Service state
         self.start_time = 0
         
-        # Initialize characteristics
-        self._create_characteristics()
+        # Advertisement state
+        self._advertisement_registered = False
+        self._advertisement_path = None
+        self._advertisement_obj = None
+        
+        # In simulation mode we still need characteristic containers for callbacks
+        if self.simulation_mode:
+            self._build_characteristics(service=None)
         
     def initialize(self) -> bool:
         """Initialize BLE adapter and service
@@ -99,6 +116,9 @@ class BLEGATTServiceManager:
                 True  # Primary service
             )
             
+            # Bind characteristics to the newly created service so BlueZero can register them
+            self._build_characteristics(service=self.service)
+
             # Register characteristics with the service
             for name, char in self.characteristics.items():
                 if hasattr(char, 'characteristic') and char.characteristic:
@@ -110,30 +130,33 @@ class BLEGATTServiceManager:
             logger.error(f"Failed to create BLE GATT service: {e}")
             raise BLEServiceError(f"Failed to create service: {e}")
     
-    def _create_characteristics(self):
-        """Create all BLE characteristics"""
+    def _build_characteristics(self, service):
+        """Instantiate all BLE characteristics against the provided service"""
         try:
-            # Create characteristics (they'll handle simulation mode internally)
             self.characteristics = {
                 'env_measurements': EnvironmentalMeasurementsCharacteristic(
-                    self.service, self.simulation_mode
+                    service, self.simulation_mode
                 ),
                 'control_targets': ControlTargetsCharacteristic(
-                    self.service, self.simulation_mode
+                    service, self.simulation_mode
                 ),
                 'stage_state': StageStateCharacteristic(
-                    self.service, self.simulation_mode
+                    service, self.simulation_mode
                 ),
                 'override_bits': OverrideBitsCharacteristic(
-                    self.service, self.simulation_mode
+                    service, self.simulation_mode
                 ),
                 'status_flags': StatusFlagsCharacteristic(
-                    self.service, self.simulation_mode
+                    service, self.simulation_mode
                 )
             }
-            
-            logger.debug("BLE characteristics created")
-            
+
+            logger.debug(
+                "BLE characteristics created (simulation=%s, service_bound=%s)",
+                self.simulation_mode,
+                service is not None,
+            )
+
         except Exception as e:
             logger.error(f"Failed to create characteristics: {e}")
             raise BLEServiceError(f"Failed to create characteristics: {e}")
@@ -144,6 +167,8 @@ class BLEGATTServiceManager:
         Returns:
             True if started successfully, False otherwise
         """
+        global DBUS_AVAILABLE  # Ensure we can access the module-level variable
+        
         if self.simulation_mode:
             logger.info("BLE GATT service started (simulation mode)")
             self._running = True
@@ -163,15 +188,38 @@ class BLEGATTServiceManager:
             self.adapter.discoverable = True
             self.adapter.alias = advertising_name
             
-            # Register service if available
+            # Register service and start advertising. Try BlueZero first,
+            # then fall back to direct BlueZ D-Bus advertisement registration
             if self.service:
-                # BlueZero automatically handles service registration
-                # Just need to ensure service is published
-                pass
+                # Attempt BlueZero automatic behavior (may be a no-op on some versions)
+                try:
+                    # Some BlueZero versions auto-publish localGATT.Service when created
+                    logger.debug("Attempting BlueZero publish flow for service")
+                except Exception:
+                    logger.debug("BlueZero publish step skipped")
+
+            # Fallback: register a LE Advertisement explicitly via D-Bus so the
+            # service UUID appears in the advertising packet (most phones will show it)
+            if DBUS_AVAILABLE:
+                try:
+                    self._register_dbus_advertisement(advertising_name)
+                except dbus.exceptions.DBusException as e:
+                    # D-Bus errors are already logged in detail by _register_dbus_advertisement
+                    # Continue anyway - the service may still be discoverable via adapter name
+                    logger.warning("Continuing without explicit D-Bus advertisement - service should still be discoverable")
+                except Exception as e:
+                    logger.error(f"Failed to register D-Bus advertisement: {e}")
+                    logger.warning("Continuing without explicit D-Bus advertisement")
+            else:
+                logger.debug("DBus not available; cannot register explicit advertisement")
             
             self._running = True
             self.start_time = time.time()
             logger.info(f"BLE GATT service started - advertising as '{advertising_name}'")
+            
+            # Log detailed status
+            self.log_advertisement_status()
+            
             return True
             
         except Exception as e:
@@ -189,7 +237,17 @@ class BLEGATTServiceManager:
         try:
             # Stop GATT application
             if hasattr(self, 'app') and self.app:
-                self.app.stop()
+                try:
+                    self.app.stop()
+                except Exception:
+                    pass
+
+            # Unregister D-Bus advertisement if registered
+            if hasattr(self, '_advertisement_registered') and self._advertisement_registered:
+                try:
+                    self._unregister_dbus_advertisement()
+                except Exception as e:
+                    logger.debug(f"Error unregistering advertisement: {e}")
                 
             if self.adapter:
                 # Stop advertising
@@ -222,6 +280,8 @@ class BLEGATTServiceManager:
     
     def update_advertising_name(self):
         """Update BLE advertising name based on current stage"""
+        global DBUS_AVAILABLE  # Ensure we can access the module-level variable
+        
         if not self._running or self.simulation_mode:
             return
             
@@ -230,6 +290,15 @@ class BLEGATTServiceManager:
             if self.adapter and self.adapter.alias != new_name:
                 self.adapter.alias = new_name
                 logger.info(f"BLE advertising name updated to: {new_name}")
+                # Also update D-Bus advertisement name if registered
+                if hasattr(self, '_advertisement_path') and self._advertisement_path:
+                    try:
+                        # Re-register advertisement with new name
+                        if DBUS_AVAILABLE:
+                            self._unregister_dbus_advertisement()
+                            self._register_dbus_advertisement(new_name)
+                    except Exception as e:
+                        logger.debug(f"Failed to update D-Bus advertisement name: {e}")
                 
         except Exception as e:
             logger.error(f"Error updating advertising name: {e}")
@@ -332,6 +401,219 @@ class BLEGATTServiceManager:
             Characteristic object or None
         """
         return self.characteristics.get(name)
+    
+    def get_advertisement_status(self) -> Dict[str, Any]:
+        """Get current BLE advertisement status
+        
+        Returns:
+            Dictionary containing advertisement status information
+        """
+        status = {
+            'service_running': self._running,
+            'simulation_mode': self.simulation_mode,
+            'advertising_name': self._get_advertising_name() if self._running else 'N/A',
+            'service_uuid': self.config.bluetooth.service_uuid,
+            'adapter_powered': False,
+            'adapter_discoverable': False,
+            'dbus_advertisement_registered': False,
+            'uptime_seconds': int(time.time() - self.start_time) if self.start_time > 0 else 0
+        }
+        
+        if not self.simulation_mode and self.adapter:
+            try:
+                status['adapter_powered'] = self.adapter.powered
+                status['adapter_discoverable'] = self.adapter.discoverable
+            except Exception as e:
+                logger.debug(f"Could not read adapter status: {e}")
+        
+        if hasattr(self, '_advertisement_registered'):
+            status['dbus_advertisement_registered'] = self._advertisement_registered
+        
+        return status
+    
+    def log_advertisement_status(self):
+        """Log detailed advertisement status"""
+        status = self.get_advertisement_status()
+        
+        logger.info("=" * 60)
+        logger.info("BLE Advertisement Status")
+        logger.info("=" * 60)
+        logger.info(f"Service Running:        {status['service_running']}")
+        logger.info(f"Simulation Mode:        {status['simulation_mode']}")
+        logger.info(f"Advertising Name:       {status['advertising_name']}")
+        logger.info(f"Service UUID:           {status['service_uuid']}")
+        logger.info(f"Adapter Powered:        {status['adapter_powered']}")
+        logger.info(f"Adapter Discoverable:   {status['adapter_discoverable']}")
+        logger.info(f"D-Bus Advertisement:    {'Registered' if status['dbus_advertisement_registered'] else 'Not Registered'}")
+        logger.info(f"Uptime:                 {status['uptime_seconds']}s")
+        logger.info("=" * 60)
+
+
+    # ----------------------- D-Bus advertisement helpers -----------------------
+    def _register_dbus_advertisement(self, advertising_name: str):
+        """Register a simple LE Advertisement via BlueZ D-Bus API.
+
+        This will ensure the custom 128-bit service UUID appears in the
+        advertising packet so scanning apps can see the service.
+        """
+        global DBUS_AVAILABLE  # Ensure we can access the module-level variable
+        
+        if not DBUS_AVAILABLE:
+            raise RuntimeError("DBus not available")
+
+        try:
+            # Ensure mainloop is set
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            
+            # Use system bus with increased timeout (default is 25 seconds, we use 60)
+            bus = dbus.SystemBus(private=False)
+
+            # Adapter path (assume hci0)
+            adapter_path = '/org/bluez/hci0'
+
+            # Create advertisement object path with unique timestamp to avoid conflicts
+            ad_path = f'/uk/co/mushpi/advertisement{int(time.time())}'
+
+            # Inner Advertisement class
+            class LEAdvertisement(dbus.service.Object):
+                def __init__(self, bus, path, advertising_type='peripheral'):
+                    self.path = path
+                    self.bus = bus
+                    dbus.service.Object.__init__(self, bus, self.path)
+                    self.ad_type = advertising_type
+                    self._service_uuid = None
+
+                def get_properties(self):
+                    return {
+                        'org.bluez.LEAdvertisement1': {
+                            'Type': dbus.String(self.ad_type),
+                            'ServiceUUIDs': dbus.Array([dbus.String(str(self._service_uuid))], signature='s'),
+                            'LocalName': dbus.String(advertising_name),
+                            'Includes': dbus.Array([dbus.String('tx-power')], signature='s')
+                        }
+                    }
+
+                @dbus.service.method('org.freedesktop.DBus.Properties', in_signature='s', out_signature='a{sv}')
+                def GetAll(self, interface):
+                    props = self.get_properties()
+                    return props.get(interface, {})
+
+                @dbus.service.method('org.bluez.LEAdvertisement1', in_signature='', out_signature='')
+                def Release(self):
+                    logger.info('Advertisement released by BlueZ')
+
+            # Create advertisement instance
+            advertisement = LEAdvertisement(bus, ad_path)
+            advertisement._service_uuid = self.config.bluetooth.service_uuid
+
+            # Get advertising manager with timeout handling
+            logger.debug("Getting advertising manager interface...")
+            ad_manager_obj = bus.get_object('org.bluez', adapter_path, introspect=False)
+            
+            # Check if LEAdvertisingManager1 interface is available
+            try:
+                # Try to introspect to see what's available
+                introspect_iface = dbus.Interface(ad_manager_obj, 'org.freedesktop.DBus.Introspectable')
+                introspect_data = introspect_iface.Introspect()
+                
+                if 'LEAdvertisingManager1' not in introspect_data:
+                    logger.warning("LEAdvertisingManager1 interface not available on this BlueZ version")
+                    logger.info("Skipping D-Bus advertisement - service will still be discoverable via adapter name")
+                    # Save that we skipped registration
+                    self._advertisement_registered = False
+                    return
+                    
+            except Exception as introspect_error:
+                logger.debug(f"Could not introspect advertising manager (this is OK): {introspect_error}")
+            
+            ad_manager = dbus.Interface(ad_manager_obj, 'org.bluez.LEAdvertisingManager1')
+            
+            # Unregister any existing advertisements first (cleanup from previous crashes)
+            try:
+                if hasattr(self, '_advertisement_path') and self._advertisement_path:
+                    logger.debug(f"Cleaning up previous advertisement: {self._advertisement_path}")
+                    ad_manager.UnregisterAdvertisement(self._advertisement_path, timeout=5)
+            except dbus.exceptions.DBusException as e:
+                logger.debug(f"No previous advertisement to clean up: {e}")
+            except Exception as e:
+                logger.debug(f"Error during cleanup: {e}")
+
+            # Register new advertisement with extended timeout
+            logger.debug(f"Registering advertisement at {ad_path}")
+            # BlueZ RegisterAdvertisement signature: "oa{sv}" (object_path, dict<string,variant>)
+            # Must explicitly create a D-Bus dictionary with proper signature to avoid
+            # "Unable to guess signature from an empty dict" error
+            # Must also use dbus.ObjectPath() to ensure correct signature
+            options = dbus.Dictionary({}, signature='sv')
+            ad_manager.RegisterAdvertisement(dbus.ObjectPath(advertisement.path), options, timeout=60)
+
+            # Save references for unregister
+            self._advertisement_obj = advertisement
+            self._advertisement_path = advertisement.path
+            self._advertisement_registered = True
+
+            logger.info(f"✓ D-Bus advertisement registered successfully")
+            logger.info(f"  Path: {ad_path}")
+            logger.info(f"  Name: '{advertising_name}'")
+            logger.info(f"  UUID: {self.config.bluetooth.service_uuid}")
+            
+        except dbus.exceptions.DBusException as e:
+            # Log specific D-Bus errors with helpful messages
+            error_msg = str(e)
+            if 'NoReply' in error_msg:
+                logger.error(f"D-Bus timeout during advertisement registration. This may indicate BlueZ daemon is overloaded or Bluetooth hardware is not ready. Error: {e}")
+                logger.info("Continuing without explicit advertisement registration - service may still be discoverable via adapter name")
+            elif 'UnknownMethod' in error_msg or 'UnknownInterface' in error_msg:
+                logger.warning(f"LEAdvertisingManager1 interface not supported by this BlueZ version. Error: {e}")
+                logger.info("This is common on older BlueZ versions (< 5.43). Service will still be discoverable via adapter name.")
+                logger.info("To use full advertisement features, upgrade BlueZ: sudo apt-get update && sudo apt-get install bluez")
+                # Not a fatal error - service still works
+            elif 'AlreadyExists' in error_msg:
+                logger.warning(f"Advertisement already registered. Error: {e}")
+                logger.info("Continuing with existing advertisement")
+            elif 'NotPermitted' in error_msg or 'AccessDenied' in error_msg:
+                logger.error(f"D-Bus permission denied. Ensure user is in 'bluetooth' group: sudo usermod -a -G bluetooth $USER. Error: {e}")
+                raise
+            else:
+                logger.error(f"D-Bus error during advertisement registration: {e}")
+                raise
+        except Exception as e:
+            logger.error(f"Unexpected error registering advertisement: {e}")
+            raise
+
+    def _unregister_dbus_advertisement(self):
+        """Unregister D-Bus advertisement with proper error handling"""
+        global DBUS_AVAILABLE  # Ensure we can access the module-level variable
+        
+        if not DBUS_AVAILABLE:
+            return
+            
+        try:
+            bus = dbus.SystemBus(private=False)
+            adapter_path = '/org/bluez/hci0'
+            ad_manager_obj = bus.get_object('org.bluez', adapter_path, introspect=False)
+            ad_manager = dbus.Interface(ad_manager_obj, 'org.bluez.LEAdvertisingManager1')
+            
+            if hasattr(self, '_advertisement_path') and self._advertisement_path:
+                try:
+                    ad_manager.UnregisterAdvertisement(self._advertisement_path, timeout=10)
+                    logger.info(f"Unregistered advertisement: {self._advertisement_path}")
+                except dbus.exceptions.DBusException as e:
+                    logger.debug(f"Advertisement may not have been registered or already removed: {e}")
+                except Exception as e:
+                    logger.debug(f"Error unregistering advertisement: {e}")
+                    
+            # Clean up D-Bus object
+            if hasattr(self, '_advertisement_obj') and self._advertisement_obj:
+                try:
+                    self._advertisement_obj.remove_from_connection()
+                except Exception as e:
+                    logger.debug(f"Error removing advertisement object from D-Bus: {e}")
+                    
+            self._advertisement_registered = False
+            
+        except Exception as e:
+            logger.debug(f"Error during advertisement cleanup: {e}")
 
 
 # Export main class

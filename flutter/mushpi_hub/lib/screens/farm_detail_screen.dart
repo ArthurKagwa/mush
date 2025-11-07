@@ -245,7 +245,7 @@ class _FarmDetailScreenState extends ConsumerState<FarmDetailScreen> {
             ),
             const SizedBox(height: 32),
             FilledButton.icon(
-              onPressed: () => context.go('/home'),
+              onPressed: () => context.go('/farms'),
               icon: const Icon(Icons.home),
               label: const Text('Go to Home'),
             ),
@@ -308,7 +308,7 @@ class _FarmDetailScreenState extends ConsumerState<FarmDetailScreen> {
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
-              onPressed: () => context.go('/home'),
+              onPressed: () => context.go('/farms'),
               icon: const Icon(Icons.home),
               label: const Text('Go to Home'),
             ),

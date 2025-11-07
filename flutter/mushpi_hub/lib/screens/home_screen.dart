@@ -185,19 +185,19 @@ class _StatsHeader extends StatelessWidget {
   final int farmCount;
   final List<Farm> farms;
 
-  /// Count farms that are currently online (last active within 30 minutes)
-  int get onlineCount {
+  /// Count farms that are currently online (last active within 1 minute)
+  int _countOnlineFarms(List<Farm> farms) {
     final now = DateTime.now();
     return farms.where((farm) {
       return farm.lastActive != null &&
-          now.difference(farm.lastActive!).inMinutes < 30;
+          now.difference(farm.lastActive!).inMinutes < 1;
     }).length;
   }
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final online = onlineCount;
+    final online = _countOnlineFarms(farms);
 
     return Card(
       child: Padding(

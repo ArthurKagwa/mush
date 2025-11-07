@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../data/models/farm.dart';
 import '../core/theme/app_theme.dart';
@@ -9,23 +10,30 @@ import '../core/theme/app_theme.dart';
 /// Shows:
 /// - Farm name and species
 /// - Current stage and days
-/// - Connection status
+/// - Connection status (real-time BLE)
 /// - Production stats
 /// - Quick metrics
+/// - Reconnect button (if showReconnect=true)
 class FarmCard extends ConsumerWidget {
   const FarmCard({
     required this.farm,
     required this.onTap,
+    this.showReconnect = false,
     super.key,
   });
 
   final Farm farm;
   final VoidCallback onTap;
+  final bool showReconnect;
 
-  @override
+    @override
   Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
-    final customColors = context.customColors;
+    final customColors = Theme.of(context).extension<AppCustomColors>()!;
+    
+    // Single source of truth: farm is online if lastActive < 1 minute
+    final isOnline = farm.lastActive != null && 
+                     DateTime.now().difference(farm.lastActive!).inMinutes < 1;
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -82,14 +90,33 @@ class FarmCard extends ConsumerWidget {
 
                   // Connection status indicator
                   _ConnectionIndicator(
-                    isConnected: farm.lastActive != null &&
-                        DateTime.now().difference(farm.lastActive!).inMinutes <
-                            30, // Changed from 5 to 30 minutes for more realistic timeout
+                    isConnected: isOnline,
                   ),
                 ],
               ),
 
               const SizedBox(height: 16),
+
+              // Reconnect button if disconnected and showReconnect is true
+              if (showReconnect && !isOnline)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12.0),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: () {
+                        // Navigate to farm detail or scan screen for reconnection
+                        context.push('/farms/scan');
+                      },
+                      icon: const Icon(Icons.refresh, size: 18),
+                      label: const Text('Reconnect'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: customColors.warning,
+                        side: BorderSide(color: customColors.warning),
+                      ),
+                    ),
+                  ),
+                ),
 
               // Production stats
               Row(

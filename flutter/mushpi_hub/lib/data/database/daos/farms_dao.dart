@@ -46,6 +46,12 @@ class FarmsDao extends DatabaseAccessor<AppDatabase> with _$FarmsDaoMixin {
         .write(FarmsCompanion(lastActive: Value(timestamp)));
   }
 
+  /// Clear farm's last active timestamp to mark as offline
+  Future<int> clearLastActive(String farmId) {
+    return (update(farms)..where((f) => f.id.equals(farmId)))
+        .write(const FarmsCompanion(lastActive: Value(null)));
+  }
+
   /// Update farm production metrics
   Future<int> updateProductionMetrics(
     String farmId,

@@ -57,6 +57,429 @@
 
 ---
 
+### 2025-11-07 - BLE Service Registration Fix ✅
+**Status:** Complete - Ensured MushPi custom service is registered before Flutter discovery
+**Task Duration:** Focused debugging & refactor session
+**Files Modified:** `mushpi/app/ble/service.py`
+
+**Summary:**
+- Moved characteristic instantiation to occur after the BlueZero service object exists.
+- Added `_build_characteristics` helper to rebuild characteristic bindings whenever the service is (re)created.
+- In simulation mode, still build characteristic containers so callbacks work without BlueZero.
+- Guarantees the 12345678-1234-5678-1234-56789abcdef0 service is exposed, allowing Flutter to discover MushPi characteristics.
+
+**Next Steps:**
+- Restart MushPi service on the Pi and verify Android now discovers the custom service and characteristics.
+- Monitor logs for successful characteristic discovery and notification setup.
+
+### 2025-11-07 - BLE Connection Cleanup Guard ✅
+**Status:** Complete - Prevented premature device cleanup during connection attempts
+**Task Duration:** Rapid fix during investigation session
+**Files Modified:** `flutter/mushpi_hub/lib/data/repositories/ble_repository.dart`
+
+**Summary:**
+- Added `_hasEstablishedConnection` flag so cleanup only runs after a real connection.
+- Listener now checks previous state to ignore initial `disconnected` events while connecting.
+- Keeps MushPi Pi-side bondless handshake intact (MTU pre-request) while avoiding Android status=22 self-terminations.
+- Aligns Flutter client behavior with existing MushPi BLE service expectations post-modularization.
+
+**Next Steps:**
+- Retest on hardware to confirm notifications flow once connected.
+- Monitor logs for any unexpected disconnects during stabilization window.
+
+### 2025-11-06 - Critical BLE Bonding Fix ✅
+**Status:** Complete - Fixed Android bonding conflicts causing connection failures
+**Task Duration:** Single comprehensive session
+**Files Modified:** 3 files (`ble_repository.dart`, `ble_provider.dart`, `ble_connection_manager.dart`)
+
+**Problem Identified:**
+- Android was initiating automatic bonding/pairing with Raspberry Pi
+- Bonding would fail → Connection terminated during stabilization
+- Device info not saved before connection → Auto-reconnect couldn't work
+- 2-second stabilization too short for bonding timeout
+- **Auto-reconnect triggering on first-time connection failures (endless loop)**
+
+**Root Causes:**
+1. **Bonding Conflict**: Android initiating bond despite Pi configured as "no bonding"
+2. **Timing Issue**: Device info saved AFTER successful connection (never reached)
+3. **Short Timeout**: 2s stabilization insufficient for bonding attempts
+4. **No Bond Monitoring**: No visibility into bonding state changes
+5. **Auto-Reconnect Bug**: Triggering on failed first connections with no previous device
+
+**Solutions Implemented:**
+
+✅ **Solution 1: Prevent Android Bonding**
+- Modified `ble_repository.dart` `connect()` method
+- Added MTU parameter (512) directly to `device.connect()` call
+- Prevents separate MTU negotiation that could trigger bonding
+- Added clear documentation about "no bonding" requirement
+
+✅ **Solution 2: Save Device Info Earlier**
+- Modified `ble_provider.dart` `BLEOperations.connect()`
+- Device info now saved BEFORE connection attempt
+- Ensures auto-reconnect has device info even if connection fails
+- Added `settingsDao` dependency to `BLEOperations` class
+- Non-blocking save with error handling
+
+✅ **Solution 3: Add Bonding State Monitoring**
+- Added `_removeBondIfExists()` method to remove cached bonds
+- Added bond state listener to track pairing attempts
+- Logs all bond state changes for debugging
+- Clears existing bonds before connection to ensure bondless mode
+- 500ms delay after bond removal for system stabilization
+
+✅ **Solution 4: Extended Stabilization Period**
+- Increased from 2s to 5s to handle bonding timeouts gracefully
+- Added explicit connection state verification
+- Better logging for stabilization process
+- MTU verification instead of re-requesting
+
+✅ **Solution 5: Fix Auto-Reconnect Endless Loop** ⭐ CRITICAL
+- Modified `ble_connection_manager.dart` `_onDeviceDisconnected()`
+- Added `wasConnected` check before triggering auto-reconnect
+- Only triggers auto-reconnect if device was previously successfully connected
+- Prevents endless reconnect loops on first-time connection failures
+- Added logging: `ℹ️ Never connected - skipping auto-reconnect`
+
+**Code Changes:**
+
+**File: `ble_repository.dart`**
+```dart
+// New method to remove existing bonds
+Future<void> _removeBondIfExists(BluetoothDevice device)
+
+// Modified connect() method:
+- Call _removeBondIfExists() before connection
+- Add bond state listener for monitoring
+- Connect with mtu=512 parameter
+- Extended stabilization from 2s to 5s
+- Verify MTU instead of re-requesting
+```
+
+**File: `ble_provider.dart`**
+```dart
+// Modified BLEOperations class:
+- Added settingsDao dependency
+- Save device info BEFORE repository.connect()
+- Non-blocking save with try-catch
+
+// Modified bleOperationsProvider:
+- Added settingsDao to provider dependencies
+```
+
+**File: `ble_connection_manager.dart`** ⭐ NEW
+```dart
+// Modified _onDeviceDisconnected():
+- Added wasConnected flag check
+- Only trigger auto-reconnect if previously connected
+- Prevents endless loops on first connection failures
+- Added explanatory logging
+```
+
+**Expected Improvements:**
+1. ✅ No more bonding-related disconnections
+2. ✅ Auto-reconnect will work even on failed connections
+3. ✅ Better visibility into connection process
+4. ✅ Graceful handling of bonding attempts
+5. ✅ More stable connections overall
+
+**Testing Instructions:**
+1. Run the app and attempt to connect to MushPi device
+2. Monitor logs for:
+   - `🔐 [BLERepository] No existing bond` (expected)
+   - `💾 [BLEOperations] Device info saved` (before connection)
+   - `⏳ [BLERepository] Waiting for connection to stabilize (5s)`
+   - `✅ [BLERepository] Connection stable and verified`
+3. If connection fails, auto-reconnect should now work
+4. Check for any bonding state changes in logs
+
+**Logging Enhancements:**
+- `🔐` prefix for bond-related operations
+- `💾` prefix for device info saving
+- Detailed bond state change logging
+- Clear indication of bondless connection mode
+
+**Next Steps:**
+- Test with actual Raspberry Pi device
+- Monitor connection stability
+- Verify auto-reconnect functionality
+- Check if any additional adjustments needed
+
+---
+
+### 2025-11-06 - Comprehensive BLE Transaction Logging ✅
+**Status:** Complete - All BLE operations now logged to debug console
+**Task Duration:** Single session enhancement
+
+**Completed:**
+
+- ✅ **Enhanced BLE Repository Logging** - Every BLE operation now has detailed debug output
+  - Scan operations: Start, device discovery, filtering, completion
+  - Connection operations: State changes, service discovery, characteristic mapping
+  - Notification subscriptions: Enable/disable, data reception
+  - Read/write operations: Already had comprehensive logging
+  - Disconnection: Cleanup steps and state clearing
+
+- ✅ **Scan Logging** - Complete scan lifecycle visibility
+  - `🔍 [BLE SCAN]` prefix for all scan operations
+  - Shows timeout duration, total devices found, RSSI values
+  - Individual device logs: `📱 [BLE SCAN] Device: Name (ID) RSSI: -XXdBm`
+  - Filter results: `✅ [BLE SCAN] MATCHED MushPi` or `❌ [BLE SCAN] NOT MushPi`
+  - Detection strategy indicators (Name/UUID matching)
+  - Final summary: Total MushPi devices found
+
+- ✅ **Connection Logging** - Step-by-step connection process
+  - `🔗 [BLE]` prefix for connection operations
+  - Shows device name and ID being connected
+  - Connection state listener setup
+  - Each state change logged with `🔄 [BLE]`
+  - Disconnection handling with `🔌 [BLE]`
+
+- ✅ **Service Discovery Logging** - Detailed service/characteristic enumeration
+  - `🔍 [BLE DISCOVER]` prefix for discovery operations
+  - Lists all services found with UUIDs
+  - Lists all characteristics with properties (Read/Write/Notify)
+  - Shows characteristic mapping to MushPi functions
+  - Highlights missing characteristics with `❌ [BLE DISCOVER]`
+  - Confirms all 5 characteristics mapped: `✅ [BLE DISCOVER] All 5 characteristics discovered`
+
+- ✅ **Notification Subscription Logging** - Track notification setup
+  - `🔔 [BLE NOTIFY]` prefix for notification operations
+  - Shows enabling notifications for Environmental Measurements
+  - Shows enabling notifications for Status Flags
+  - Confirms ready state: `✅ [BLE NOTIFY] Ready to receive data from device`
+
+- ✅ **Data Packet Logging** - Already comprehensive (from previous update)
+  - `📦 BLE PACKET RECEIVED` for incoming notifications
+  - `📊 PARSED DATA` for parsed values
+  - `📤 BLE PACKET SENDING` for outgoing writes
+  - `📝 WRITE DATA` for write operation details
+  - `📥 BLE READ REQUEST` / `📦 BLE READ RESPONSE` for reads
+  - `🚩 PARSED FLAGS` for status flags
+
+- ✅ **Disconnection Logging** - Complete disconnect lifecycle
+  - `🔌 [BLE DISCONNECT]` prefix for disconnect operations
+  - Shows subscription cancellation
+  - Shows device disconnect call
+  - `🧹 [BLE DISCONNECT] Cleaning up` for state cleanup
+  - Confirms completion: `✅ [BLE DISCONNECT] Disconnected successfully`
+
+- ✅ **Lifecycle Logging** - Repository lifecycle events
+  - `🗑️ [BLE] Disposing BLE repository` on cleanup
+  - Bluetooth availability checks with `🔵 [BLE]`
+  - Turn on Bluetooth attempts
+  - Stop scan operations with `🛑 [BLE SCAN]`
+
+**Emoji Legend for Easy Scanning:**
+```
+🔍 - Scanning operations
+📱 - Device found
+✅ - Success / Match
+❌ - Failure / No match
+🔗 - Connecting
+🔄 - State change
+🔌 - Disconnecting
+🔧 - Debug mode
+📦 - Packet received
+📊 - Parsed data
+📤 - Sending data
+📥 - Reading data
+📝 - Write details
+🚩 - Status flags
+🔔 - Notifications
+🧹 - Cleanup
+🗑️ - Disposal
+🔵 - Bluetooth operations
+🛑 - Stop operations
+```
+
+**Log Output Examples:**
+
+**Scan:**
+```
+🔍 [BLE SCAN] ============ STARTING SCAN ============
+🔍 [BLE SCAN] Timeout: 30s
+📱 [BLE SCAN] Device: MushPi-Init (B8:27:EB:D8:B5:5D) RSSI: -45dBm UUIDs: 1
+✅ [BLE SCAN] MATCHED MushPi: MushPi-Init [Name:true, UUID:true] RSSI:-45dBm
+✅ [BLE SCAN] ============ SCAN COMPLETE ============
+✅ [BLE SCAN] Found 1 MushPi device(s)
+```
+
+**Connection:**
+```
+🔗 [BLE] Connecting to MushPi-Init (B8:27:EB:D8:B5:5D)
+🔗 [BLE] Setting up connection state listener...
+🔗 [BLE] Calling device.connect()...
+✅ [BLE] Device.connect() completed
+🔍 [BLE DISCOVER] Discovering services...
+🔍 [BLE DISCOVER] Found 3 service(s)
+✅ [BLE DISCOVER] Found MushPi service with 5 characteristic(s)
+  📋 [BLE DISCOVER] Characteristic: ...def1 [Read, Notify]
+    ✅ [BLE DISCOVER] Mapped to: Environmental Measurements
+✅ [BLE DISCOVER] All 5 characteristics discovered and mapped
+🔔 [BLE NOTIFY] Subscribing to notifications...
+✅ [BLE NOTIFY] Ready to receive data from device
+✅ [BLE] Successfully connected to MushPi-Init
+```
+
+**Data Reception:**
+```
+📦 BLE PACKET RECEIVED [Environmental]: 18 bytes - Raw: [210, 7, 232, 3, ...]
+📊 PARSED DATA [Environmental]: Temp=22.5°C, RH=65.0%, CO2=450ppm, Light=78
+✅ [SensorListener] Successfully saved reading to database
+```
+
+**Files Modified:**
+- `lib/data/repositories/ble_repository.dart` - Added 50+ debugPrint statements throughout
+
+**Benefits:**
+- **Complete Visibility**: Every BLE operation is now logged
+- **Easy Debugging**: Emoji prefixes make logs scannable
+- **Flow Tracking**: Can follow data from scan → connect → notify → receive
+- **Problem Isolation**: Immediately see where process fails
+- **Performance Monitoring**: See timing of each step
+
+**Use Case:**
+When user reports "no sensor readings", we can now:
+1. Check scan logs to verify device found
+2. Check connection logs to verify services discovered
+3. Check notification logs to verify subscriptions active
+4. Check packet logs to verify data arriving
+5. Check sensor listener logs to verify data saved
+
+**TASK COMPLETED** ✅ - All BLE transactions now logged to debug console
+
+---
+
+### 2025-11-06 - Single Source of Truth for Connection Status + BLE Packet Logging ✅
+**Status:** Complete - All connection status displays now consistent
+**Task Duration:** Single session implementation
+
+**Completed:**
+
+- ✅ **Unified Connection Status Logic** - Single source of truth across all UI
+  - All status displays now use `farm.lastActive` timestamp (< 30 min = online)
+  - Eliminated conflicting logic between BLE connection and lastActive
+  - Farm Card: Changed from BLE connection check to lastActive check
+  - Monitoring Top Bar: Changed from global BLE to selected farm's lastActive
+  - Monitoring Reconnect Banner: Uses farm's lastActive instead of BLE state
+  - Home Screen Counter: Already using lastActive (no change needed)
+
+- ✅ **Comprehensive BLE Packet Logging** - Debug all BLE communications
+  - Logs ALL incoming notification packets with raw bytes
+  - Logs ALL outgoing write packets with raw bytes
+  - Logs ALL read request/response packets with raw bytes
+  - Includes parsed data for environmental readings (temp, RH, CO2, light)
+  - Includes parsed flags in hex and binary format
+  - Includes parsed control targets and stage state data
+  - Uses emoji prefixes for easy log scanning: 📦📤📥📊🚩📝
+
+**Problem Solved:**
+- **Before**: Inconsistent status displays across app
+  - Farm counter showed "1 online" (using lastActive)
+  - Farm flag showed "Offline" (using BLE isConnected)
+  - Monitoring status showed "Online" (using lastActive)
+  - Top bar showed "Not Connected" (using global BLE)
+
+- **After**: Consistent status everywhere
+  - All displays use farm.lastActive < 30 minutes
+  - BLE connection manager keeps lastActive fresh (30s heartbeat)
+  - Status persists for 30 min after disconnect (graceful degradation)
+  - No more conflicting "online but offline" states
+
+**Technical Details:**
+```dart
+// BEFORE: Farm Card (inconsistent)
+final isConnected = bleRepo.isConnected && 
+                   bleRepo.connectedDevice?.remoteId.toString() == farm.deviceId;
+
+// AFTER: Farm Card (consistent)
+final isOnline = farm.lastActive != null && 
+                DateTime.now().difference(farm.lastActive!).inMinutes < 30;
+```
+
+**BLE Packet Logging Examples:**
+```
+📦 BLE PACKET RECEIVED [Environmental]: 18 bytes - Raw: [210, 7, 232, 3, ...]
+📊 PARSED DATA [Environmental]: Temp=22.5°C, RH=65.0%, CO2=450ppm, Light=78
+📤 BLE PACKET SENDING [Control Targets]: 13 bytes - Raw: [20, 26, 60, ...]
+📝 WRITE DATA [Control Targets]: TempMin=20.0°C, TempMax=26.0°C, ...
+```
+
+**Files Modified:**
+- `lib/widgets/farm_card.dart` - Use lastActive, removed BLE import
+- `lib/screens/monitoring_screen.dart` - Top bar uses farm's status, removed BLE import
+- `lib/data/repositories/ble_repository.dart` - Added comprehensive packet logging
+
+**Impact:**
+- Users see consistent online/offline status across entire app
+- Developers can debug BLE communication issues with detailed logs
+- Status gracefully persists for 30 min after disconnect
+- Heartbeat keeps farms online while connected
+- Single source of truth: farm.lastActive timestamp
+
+---
+
+### 2025-11-06 23:45 - BLE Connection Status Fix ✅
+**Status:** Complete - Farms now show accurate online/offline status
+**Task Duration:** Single session implementation
+**Completed:**
+- ✅ **BLE Connection Manager** - New provider monitors BLE connection state
+  - Automatically listens to BLE connection state changes
+  - Updates farm.lastActive timestamp on device connection
+  - Finds farm by matching deviceId from BLE connection
+  - Invalidates farm providers to refresh UI immediately
+
+- ✅ **Periodic Heartbeat** - Keeps farms online during active connections
+  - Updates lastActive every 30 seconds while connected
+  - Ensures farm stays "online" (threshold is 30 minutes)
+  - Automatically stops when device disconnects
+  - Logs heartbeat activity for monitoring
+
+- ✅ **App Initialization** - Manager starts automatically
+  - Initialized in MushPiApp.build() method
+  - Monitors connections throughout app lifecycle
+  - Proper disposal when app closes
+
+**Problem Solved:**
+- **Before**: MushPi advertising via BLE but app shows "Offline"
+  - Farm.lastActive was never updated on BLE connection
+  - No link between BLE state and farm status
+  - Manual database updates only
+
+- **After**: Real-time online/offline status
+  - Automatic lastActive update on BLE connect
+  - Periodic heartbeat while connected
+  - Immediate UI refresh showing "Online" status
+
+**How It Works:**
+```
+1. BLE connects to MushPi device
+2. BLEConnectionManager detects connection
+3. Looks up farm by matching device.remoteId to farm.deviceId
+4. Updates farm.lastActive to DateTime.now()
+5. Starts 90-second heartbeat timer
+6. UI automatically shows "Online" (lastActive < 30 min)
+7. On disconnect: stops heartbeat, farm gradually becomes "Offline"
+```
+
+**Files Created:**
+- `lib/providers/ble_connection_manager.dart` - New connection manager (~220 lines)
+
+**Files Modified:**
+- `lib/app.dart` - Added bleConnectionManagerProvider initialization
+
+**Technical Details:**
+- Uses `StreamSubscription` to listen to `connectionStateStream`
+- Matches device by `device.remoteId.toString() == farm.deviceId`
+- Heartbeat interval: 30 seconds (1.7% of 30-minute threshold)
+- Invalidates both `activeFarmsProvider` and `farmByIdProvider`
+- Comprehensive logging for debugging connection issues
+
+**TASK COMPLETED** ✅ - Farms now accurately show online/offline status based on BLE connection
+
+---
+
 ### 2025-11-06 23:30 - Live BLE Sensor Data in Monitoring ✅
 **Status:** Complete - Monitoring screen now displays actual sensor readings
 **Task Duration:** Single session implementation

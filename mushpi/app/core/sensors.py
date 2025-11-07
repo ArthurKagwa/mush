@@ -27,8 +27,7 @@ RELAY_PINS = config.gpio.get_relay_pins()
 SCD41_ADDRESS = config.i2c.scd41_address
 ADS1115_ADDRESS = config.i2c.ads1115_address
 
-# Logging Setup
-logging.basicConfig(level=logging.INFO)
+# Logging Setup - use parent logger configured in main.py
 logger = logging.getLogger(__name__)
 
 # Initialize managers and main sensor system

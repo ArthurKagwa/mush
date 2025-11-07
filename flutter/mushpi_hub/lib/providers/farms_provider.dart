@@ -455,6 +455,24 @@ class FarmOperations {
     }
   }
 
+  /// Clear lastActive timestamp to mark farm as offline
+  Future<void> clearLastActive(String farmId) async {
+    try {
+      await repository.clearLastActive(farmId);
+
+      // Refresh farms list
+      _refreshFarms();
+    } catch (error, stackTrace) {
+      developer.log(
+        'Failed to clear last active',
+        name: 'mushpi.providers.farms.ops',
+        error: error,
+        stackTrace: stackTrace,
+        level: 900,
+      );
+    }
+  }
+
   /// Record a harvest for a farm
   Future<String> recordHarvest({
     required String id,
