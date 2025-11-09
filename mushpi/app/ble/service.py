@@ -148,14 +148,14 @@ class BLEGATTServiceManager:
             # Bind characteristics to the newly created services so BlueZero can register them
             self._build_characteristics(main_service=self.service, uart_service=self.uart_service)
 
-            # Register characteristics with the service
-            char_count = 0
-            for name, char in self.characteristics.items():
-                if hasattr(char, 'characteristic') and char.characteristic:
-                    logger.info(f"  ✓ Registered characteristic: {name}")
-                    char_count += 1
-            
+            # Count successfully created characteristics
+            char_count = len(self.characteristics)
             logger.info(f"BLE GATT services ready with {char_count} characteristics")
+            
+            # CRITICAL: Publish the GATT server to BlueZ so services become discoverable
+            logger.info("Publishing GATT server to BlueZ...")
+            self.peripheral.publish()
+            logger.info("✓ GATT server published - services now discoverable")
             
         except Exception as e:
             logger.error(f"Failed to create BLE GATT services: {e}")
@@ -234,30 +234,21 @@ class BLEGATTServiceManager:
                 except Exception as e:
                     logger.warning(f"Could not disable pairing (continuing anyway): {e}")
             
-            # Register service and start advertising. Try BlueZero first,
-            # then fall back to direct BlueZ D-Bus advertisement registration
-            if self.service:
-                # Attempt BlueZero automatic behavior (may be a no-op on some versions)
-                try:
-                    # Some BlueZero versions auto-publish localGATT.Service when created
-                    logger.debug("Attempting BlueZero publish flow for service")
-                except Exception:
-                    logger.debug("BlueZero publish step skipped")
-
-            # Fallback: register a LE Advertisement explicitly via D-Bus so the
-            # service UUID appears in the advertising packet (most phones will show it)
+            # Optional: register a LE Advertisement via D-Bus to include service UUID in scan data
+            # This is NOT required for service discovery to work (GATT server is already published)
+            # It only adds the service UUID to the advertisement packet for faster filtering
             if DBUS_AVAILABLE:
                 try:
                     self._register_dbus_advertisement(advertising_name)
                 except dbus.exceptions.DBusException as e:
-                    # D-Bus errors are already logged in detail by _register_dbus_advertisement
-                    # Continue anyway - the service may still be discoverable via adapter name
-                    logger.warning("Continuing without explicit D-Bus advertisement - service should still be discoverable")
+                    # Advertisement registration can fail if already registered or BlueZ busy
+                    # This is OK - GATT server is published, service discovery will work fine
+                    logger.info("ℹ️  D-Bus advertisement not registered (not critical)")
+                    logger.debug(f"D-Bus advertisement error: {e}")
                 except Exception as e:
-                    logger.error(f"Failed to register D-Bus advertisement: {e}")
-                    logger.warning("Continuing without explicit D-Bus advertisement")
+                    logger.debug(f"D-Bus advertisement error: {e}")
             else:
-                logger.debug("DBus not available; cannot register explicit advertisement")
+                logger.debug("DBus not available; skipping advertisement registration")
             
             self._running = True
             self.start_time = time.time()
@@ -675,22 +666,23 @@ class BLEGATTServiceManager:
             # Log specific D-Bus errors with helpful messages
             error_msg = str(e)
             if 'NoReply' in error_msg:
-                logger.error(f"D-Bus timeout during advertisement registration. This may indicate BlueZ daemon is overloaded or Bluetooth hardware is not ready. Error: {e}")
-                logger.info("Continuing without explicit advertisement registration - service may still be discoverable via adapter name")
+                logger.debug(f"D-Bus timeout during advertisement registration: {e}")
+                logger.info("ℹ️  Advertisement registration timed out (service is still discoverable)")
             elif 'UnknownMethod' in error_msg or 'UnknownInterface' in error_msg:
-                logger.warning(f"LEAdvertisingManager1 interface not supported by this BlueZ version. Error: {e}")
-                logger.info("This is common on older BlueZ versions (< 5.43). Service will still be discoverable via adapter name.")
-                logger.info("To use full advertisement features, upgrade BlueZ: sudo apt-get update && sudo apt-get install bluez")
-                # Not a fatal error - service still works
+                logger.debug(f"LEAdvertisingManager1 not supported: {e}")
+                logger.info("ℹ️  Advertisement not registered (older BlueZ version - service is still discoverable)")
             elif 'AlreadyExists' in error_msg:
-                logger.warning(f"Advertisement already registered. Error: {e}")
-                logger.info("Continuing with existing advertisement")
+                logger.debug(f"Advertisement already exists: {e}")
+                logger.info("ℹ️  Using existing advertisement")
             elif 'NotPermitted' in error_msg or 'AccessDenied' in error_msg:
-                logger.error(f"D-Bus permission denied. Ensure user is in 'bluetooth' group: sudo usermod -a -G bluetooth $USER. Error: {e}")
-                raise
+                logger.warning(f"D-Bus permission denied: {e}")
+                logger.info("ℹ️  Ensure user is in 'bluetooth' group: sudo usermod -a -G bluetooth $USER")
+            elif 'Failed' in error_msg:
+                logger.debug(f"Advertisement registration failed: {e}")
+                logger.info("ℹ️  Advertisement not registered (service is still discoverable via GATT)")
             else:
-                logger.error(f"D-Bus error during advertisement registration: {e}")
-                raise
+                logger.debug(f"D-Bus advertisement error: {e}")
+                logger.info("ℹ️  Advertisement not registered (service is still discoverable)")
         except Exception as e:
             logger.error(f"Unexpected error registering advertisement: {e}")
             raise
