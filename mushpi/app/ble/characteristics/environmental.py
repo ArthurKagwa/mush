@@ -76,8 +76,9 @@ class EnvironmentalMeasurementsCharacteristic(NotifyCharacteristic):
         self.env_data.light_raw = light if light is not None else 0
         self.env_data.update_uptime(start_time)
         
-        logger.debug(f"Environmental data updated: T={temp}°C, RH={rh}%, "
-                    f"CO2={co2}ppm, L={light}")
+        uptime_sec = self.env_data.uptime_ms // 1000
+        logger.info(f"BLE advertising readings: T={temp}°C, RH={rh}%, "
+                   f"CO2={co2}ppm, Light={light} (uptime: {uptime_sec}s)")
     
     def _update_from_sensor_data(self, sensor_data):
         """Update from sensor data callback result
@@ -110,12 +111,20 @@ class EnvironmentalMeasurementsCharacteristic(NotifyCharacteristic):
         try:
             data = EnvironmentalSerializer.pack(self.env_data)
             
+            # Log notification details
+            temp_c = self.env_data.temp_x10 / 10.0
+            rh_pct = self.env_data.rh_x10 / 10.0
+            logger.info(f"BLE notifying {len(connected_devices)} device(s): "
+                       f"T={temp_c:.1f}°C, RH={rh_pct:.1f}%, "
+                       f"CO2={self.env_data.co2_ppm}ppm, Light={self.env_data.light_raw}")
+            
             # Send notification to all connected devices
             for device in connected_devices:
                 try:
                     self.notify(data, device)
+                    logger.debug(f"  ✓ Notified device: {device}")
                 except Exception as e:
-                    logger.warning(f"Failed to notify device {device}: {e}")
+                    logger.warning(f"  ✗ Failed to notify device {device}: {e}")
                     
         except Exception as e:
             logger.error(f"Error notifying environmental data: {e}")

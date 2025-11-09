@@ -11,7 +11,7 @@ import time
 from typing import Optional, Dict, Any, Callable, Set
 
 try:
-    from bluezero import adapter
+    from bluezero import adapter, peripheral
     from bluezero import localGATT
     BLE_AVAILABLE = True
 except ImportError:
@@ -35,6 +35,8 @@ from .characteristics.control_targets import ControlTargetsCharacteristic
 from .characteristics.stage_state import StageStateCharacteristic
 from .characteristics.override_bits import OverrideBitsCharacteristic
 from .characteristics.status_flags import StatusFlagsCharacteristic
+from .characteristics.uart import UARTRXCharacteristic, UARTTXCharacteristic
+from .uuids import UART_SERVICE_UUID
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,9 @@ class BLEGATTServiceManager:
         """Initialize BLE GATT service manager"""
         self.config = config
         self.adapter = None
+        self.peripheral = None
         self.service = None
+        self.uart_service = None
         self.characteristics = {}
         self.simulation_mode = self.config.development.simulation_mode
         
@@ -91,70 +95,104 @@ class BLEGATTServiceManager:
             self.adapter = adapter.Adapter()
             if not self.adapter.powered:
                 self.adapter.powered = True
+
+            # Create peripheral
+            self.peripheral = peripheral.Peripheral(self.adapter.address, local_name=self.config.bluetooth.name_prefix)
                 
-            # Create GATT service
-            self._create_service()
+            # Create GATT services
+            self._create_services()
             
-            logger.info("BLE GATT service initialized successfully")
+            logger.info("BLE GATT services initialized successfully")
             return True
             
         except Exception as e:
             logger.error(f"Failed to initialize BLE GATT service: {e}")
             return False
     
-    def _create_service(self):
-        """Create BLE GATT service and register characteristics"""
+    def _create_services(self):
+        """Create BLE GATT services and register characteristics"""
         if self.simulation_mode:
             logger.info("BLE GATT service creation skipped (simulation mode)")
             return
             
         try:
-            # Create main GATT service using localGATT
-            self.service = localGATT.Service(
-                1,  # Service ID
-                self.config.bluetooth.service_uuid,
-                True  # Primary service
+            logger.info("Creating BLE GATT services...")
+            
+            # Create main GATT service using peripheral API
+            logger.info(f"  Service UUID: {self.config.bluetooth.service_uuid}")
+            srv_id_main = 1
+            self.peripheral.add_service(
+                srv_id=srv_id_main,
+                uuid=self.config.bluetooth.service_uuid,
+                primary=True
             )
             
-            # Bind characteristics to the newly created service so BlueZero can register them
-            self._build_characteristics(service=self.service)
+            # Create a service object wrapper with required attributes
+            class ServiceWrapper:
+                def __init__(self, peripheral, srv_id):
+                    self.peripheral = peripheral
+                    self.srv_id = srv_id
+            
+            self.service = ServiceWrapper(self.peripheral, srv_id_main)
+            
+            # Create UART service
+            logger.info(f"  UART Service UUID: {UART_SERVICE_UUID}")
+            srv_id_uart = 2
+            self.peripheral.add_service(
+                srv_id=srv_id_uart,
+                uuid=UART_SERVICE_UUID,
+                primary=True
+            )
+            self.uart_service = ServiceWrapper(self.peripheral, srv_id_uart)
+            
+            # Bind characteristics to the newly created services so BlueZero can register them
+            self._build_characteristics(main_service=self.service, uart_service=self.uart_service)
 
             # Register characteristics with the service
+            char_count = 0
             for name, char in self.characteristics.items():
                 if hasattr(char, 'characteristic') and char.characteristic:
-                    logger.debug(f"Registered characteristic: {name}")
+                    logger.info(f"  ✓ Registered characteristic: {name}")
+                    char_count += 1
             
-            logger.info("BLE GATT characteristics created successfully")
+            logger.info(f"BLE GATT services ready with {char_count} characteristics")
             
         except Exception as e:
-            logger.error(f"Failed to create BLE GATT service: {e}")
-            raise BLEServiceError(f"Failed to create service: {e}")
+            logger.error(f"Failed to create BLE GATT services: {e}")
+            raise BLEServiceError(f"Failed to create services: {e}")
     
-    def _build_characteristics(self, service):
-        """Instantiate all BLE characteristics against the provided service"""
+    def _build_characteristics(self, main_service, uart_service):
+        """Instantiate all BLE characteristics against the provided services"""
         try:
             self.characteristics = {
                 'env_measurements': EnvironmentalMeasurementsCharacteristic(
-                    service, self.simulation_mode
+                    main_service, self.simulation_mode
                 ),
                 'control_targets': ControlTargetsCharacteristic(
-                    service, self.simulation_mode
+                    main_service, self.simulation_mode
                 ),
                 'stage_state': StageStateCharacteristic(
-                    service, self.simulation_mode
+                    main_service, self.simulation_mode
                 ),
                 'override_bits': OverrideBitsCharacteristic(
-                    service, self.simulation_mode
+                    main_service, self.simulation_mode
                 ),
                 'status_flags': StatusFlagsCharacteristic(
-                    service, self.simulation_mode
+                    main_service, self.simulation_mode
+                ),
+                'uart_rx': UARTRXCharacteristic(
+                    uart_service, self.simulation_mode
+                ),
+                'uart_tx': UARTTXCharacteristic(
+                    uart_service, self.simulation_mode
                 )
             }
 
             logger.debug(
-                "BLE characteristics created (simulation=%s, service_bound=%s)",
+                "BLE characteristics created (simulation=%s, main_service_bound=%s, uart_service_bound=%s)",
                 self.simulation_mode,
-                service is not None,
+                main_service is not None,
+                uart_service is not None
             )
 
         except Exception as e:
@@ -187,6 +225,14 @@ class BLEGATTServiceManager:
             self.adapter.powered = True
             self.adapter.discoverable = True
             self.adapter.alias = advertising_name
+            
+            # Disable pairing/bonding via D-Bus to prevent connection drops
+            if DBUS_AVAILABLE:
+                try:
+                    self._disable_pairing()
+                    logger.info("✓ BLE pairing/bonding disabled")
+                except Exception as e:
+                    logger.warning(f"Could not disable pairing (continuing anyway): {e}")
             
             # Register service and start advertising. Try BlueZero first,
             # then fall back to direct BlueZ D-Bus advertisement registration
@@ -450,6 +496,71 @@ class BLEGATTServiceManager:
 
 
     # ----------------------- D-Bus advertisement helpers -----------------------
+    def _disable_pairing(self):
+        """Disable Bluetooth pairing/bonding to allow connections without authentication.
+        
+        This prevents the "bonding" process that causes the Flutter app to disconnect.
+        Sets the adapter to "NoInputNoOutput" capability which disables pairing.
+        """
+        global DBUS_AVAILABLE
+        
+        if not DBUS_AVAILABLE:
+            return
+            
+        try:
+            bus = dbus.SystemBus(private=False)
+            adapter_path = '/org/bluez/hci0'
+            
+            # Get adapter object
+            adapter_obj = bus.get_object('org.bluez', adapter_path)
+            adapter_props = dbus.Interface(adapter_obj, 'org.freedesktop.DBus.Properties')
+            
+            # Set pairable to False to prevent pairing requests
+            adapter_props.Set('org.bluez.Adapter1', 'Pairable', dbus.Boolean(False))
+            logger.info("  ✓ Set adapter.Pairable = False")
+            
+            # Set discoverable timeout to 0 (always discoverable while powered)
+            adapter_props.Set('org.bluez.Adapter1', 'DiscoverableTimeout', dbus.UInt32(0))
+            logger.info("  ✓ Set adapter.DiscoverableTimeout = 0")
+            
+            # Remove all previously paired devices to ensure clean connections
+            try:
+                adapter_iface = dbus.Interface(adapter_obj, 'org.bluez.Adapter1')
+                devices = adapter_iface.GetManagedObjects() if hasattr(adapter_iface, 'GetManagedObjects') else {}
+                
+                # Alternative: get devices from object manager
+                if not devices:
+                    obj_manager = bus.get_object('org.bluez', '/')
+                    obj_iface = dbus.Interface(obj_manager, 'org.freedesktop.DBus.ObjectManager')
+                    managed_objects = obj_iface.GetManagedObjects()
+                    
+                    removed_count = 0
+                    for path, interfaces in managed_objects.items():
+                        if 'org.bluez.Device1' in interfaces:
+                            device_props = interfaces['org.bluez.Device1']
+                            if device_props.get('Paired', False):
+                                try:
+                                    adapter_iface.RemoveDevice(dbus.ObjectPath(path))
+                                    removed_count += 1
+                                    logger.debug(f"  ✓ Removed paired device: {path}")
+                                except Exception as e:
+                                    logger.debug(f"  Could not remove device {path}: {e}")
+                    
+                    if removed_count > 0:
+                        logger.info(f"  ✓ Removed {removed_count} previously paired device(s)")
+                        
+            except Exception as e:
+                logger.debug(f"  Could not remove paired devices: {e}")
+            
+            logger.info("BLE adapter configured for connectionless operation (no pairing)")
+            
+        except dbus.exceptions.DBusException as e:
+            logger.warning(f"D-Bus error while disabling pairing: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error disabling pairing: {e}")
+            raise
+    
     def _register_dbus_advertisement(self, advertising_name: str):
         """Register a simple LE Advertisement via BlueZ D-Bus API.
 
@@ -481,13 +592,16 @@ class BLEGATTServiceManager:
                     self.bus = bus
                     dbus.service.Object.__init__(self, bus, self.path)
                     self.ad_type = advertising_type
-                    self._service_uuid = None
+                    self.config = None
 
                 def get_properties(self):
                     return {
                         'org.bluez.LEAdvertisement1': {
                             'Type': dbus.String(self.ad_type),
-                            'ServiceUUIDs': dbus.Array([dbus.String(str(self._service_uuid))], signature='s'),
+                            'ServiceUUIDs': dbus.Array([
+                                dbus.String(str(self.config.bluetooth.service_uuid)),
+                                dbus.String(str(UART_SERVICE_UUID))
+                            ], signature='s'),
                             'LocalName': dbus.String(advertising_name),
                             'Includes': dbus.Array([dbus.String('tx-power')], signature='s')
                         }
@@ -504,7 +618,7 @@ class BLEGATTServiceManager:
 
             # Create advertisement instance
             advertisement = LEAdvertisement(bus, ad_path)
-            advertisement._service_uuid = self.config.bluetooth.service_uuid
+            advertisement.config = self.config
 
             # Get advertising manager with timeout handling
             logger.debug("Getting advertising manager interface...")

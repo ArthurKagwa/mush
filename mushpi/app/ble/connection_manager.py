@@ -85,19 +85,24 @@ class ConnectionManager:
         """
         try:
             device_address = getattr(device, 'address', 'unknown')
+            device_name = getattr(device, 'name', 'Unknown Device')
             
             with self._lock:
                 self.connected_devices.add(device_address)
                 
-            logger.info(f"BLE device connected: {device_address} "
-                       f"(total: {len(self.connected_devices)})")
+            logger.info("=" * 60)
+            logger.info("🔌 BLE DEVICE CONNECTED")
+            logger.info(f"  Address: {device_address}")
+            logger.info(f"  Name: {device_name}")
+            logger.info(f"  Total connected: {len(self.connected_devices)}")
+            logger.info("=" * 60)
             
             # Call external callback if set
             if self.on_connect_callback:
                 self.on_connect_callback(device_address, self.connected_devices.copy())
             
         except Exception as e:
-            logger.error(f"Error handling device connection: {e}")
+            logger.error(f"Error handling device connection: {e}", exc_info=True)
     
     def _on_device_disconnected(self, device):
         """Callback when a device disconnects
@@ -107,19 +112,24 @@ class ConnectionManager:
         """
         try:
             device_address = getattr(device, 'address', 'unknown')
+            device_name = getattr(device, 'name', 'Unknown Device')
             
             with self._lock:
                 self.connected_devices.discard(device_address)
                 
-            logger.info(f"BLE device disconnected: {device_address} "
-                       f"(total: {len(self.connected_devices)})")
+            logger.info("=" * 60)
+            logger.warning("🔌 BLE DEVICE DISCONNECTED")
+            logger.info(f"  Address: {device_address}")
+            logger.info(f"  Name: {device_name}")
+            logger.info(f"  Total connected: {len(self.connected_devices)}")
+            logger.info("=" * 60)
             
             # Call external callback if set
             if self.on_disconnect_callback:
                 self.on_disconnect_callback(device_address, self.connected_devices.copy())
             
         except Exception as e:
-            logger.error(f"Error handling device disconnection: {e}")
+            logger.error(f"Error handling device disconnection: {e}", exc_info=True)
     
     def get_connected_devices(self) -> Set[str]:
         """Get set of connected device addresses

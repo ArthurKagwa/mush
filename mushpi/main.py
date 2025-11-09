@@ -45,6 +45,13 @@ def loop():
                 status = control_system.get_status()
                 logger.debug(f"Control status: {status}")
                 
+                # Log BLE connection status
+                connection_count = ble_gatt.get_connection_count()
+                if connection_count > 0:
+                    logger.info(f"🔗 BLE Status: {connection_count} device(s) connected")
+                else:
+                    logger.debug("🔗 BLE Status: No devices connected")
+                
                 # Update BLE with current environmental data
                 try:
                     ble_gatt.notify_env_packet(

@@ -1,18 +1,24 @@
 """
-BLE GATT Base Classes and Common Utilities
+BLE GATT Base Classes and Common Utilities - Modern bluezero (>=0.8.0, including 0.9.1)
 
-Base classes for BLE characteristics and common functionality.
+Single-attempt creation using peripheral.add_characteristic (as in official examples).
+Assumes your BaseService has:
+- self.peripheral: peripheral.Peripheral instance
+- self.srv_id: int (from peripheral.add_service(srv_id=..., ...))
+
+See: https://bluezero.readthedocs.io/en/stable/examples.html#peripheral-nordic-uart-service
 """
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional, Any, Callable
+from typing import Optional, Any, Dict
 
 try:
     from bluezero import peripheral
-    BLE_AVAILABLE = True
 except ImportError:
-    BLE_AVAILABLE = False
+    peripheral = None
+
+BLE_AVAILABLE = peripheral is not None
 
 from ..models.ble_dataclasses import StatusFlags
 
@@ -30,134 +36,199 @@ class CharacteristicError(BLEError):
 
 
 class BaseCharacteristic(ABC):
-    """Base class for BLE GATT characteristics"""
-    
-    def __init__(self, uuid: str, properties: list, service=None, simulation_mode: bool = False):
-        """Initialize base characteristic
-        
-        Args:
-            uuid: Characteristic UUID
-            properties: List of properties (e.g., ['read', 'write', 'notify'])
-            service: BLE service object
-            simulation_mode: Whether running in simulation mode
-        """
+    """Base class for BLE GATT characteristics - modern bluezero API (single attempt)"""
+
+    _service_indices = {}  # srv_id -> next chr_id (starts at 1)
+
+    def __init__(self, uuid: str, properties: list[str], service=None, simulation_mode: bool = False):
         self.uuid = uuid
-        self.properties = properties
+        self.properties = properties  # e.g. ['read', 'notify']
         self.service = service
         self.simulation_mode = simulation_mode
-        self.characteristic = None
-        
-        # Create characteristic if not in simulation mode
-        if not simulation_mode and BLE_AVAILABLE and service:
+        self.characteristic: Optional[Any] = None
+
+        if not self.simulation_mode and BLE_AVAILABLE and self.service:
+            if not hasattr(self.service, "peripheral") or not hasattr(self.service, "srv_id"):
+                raise CharacteristicError("Service must have .peripheral and .srv_id attributes")
             self._create_characteristic()
-    
+
+    def _handle_notify_callback(self, notifying: bool, characteristic: Any):
+        """Called when client enables/disables CCCD"""
+        self.characteristic = characteristic
+        logger.info(f"BLE {'ENABLED' if notifying else 'DISABLED'}: {self.uuid}")
+
     def _create_characteristic(self):
-        """Create the actual BLE characteristic"""
+        """Single-attempt creation matching official examples"""
         if self.simulation_mode or not BLE_AVAILABLE:
-            logger.debug(f"Skipping characteristic creation for {self.uuid} (simulation/no BLE)")
+            logger.debug(f"Skipping creation (simulation/no BLE): {self.uuid}")
             return
-            
-        try:
-            self.characteristic = peripheral.Characteristic(
-                self.uuid,
-                self.properties,
-                self.service
-            )
-            
-            # Set up callbacks based on properties
-            if 'read' in self.properties:
-                self.characteristic.read_callback = self._handle_read
-            if 'write' in self.properties:
-                self.characteristic.write_callback = self._handle_write
-                
-            logger.debug(f"Created characteristic {self.uuid} with properties {self.properties}")
+
+        peripheral = self.service.peripheral
+        srv_id = self.service.srv_id
+        chr_id = self._get_next_index_for_service(self.service)
+
+                read_cb = self._handle_read_with_logging if 'read' in self.properties else None
+                write_cb = self._handle_write_with_logging if 'write' in self.properties else None
+
+                # Some bluezero releases accept different signatures. Try the most
+                # complete form first (includes notifying flag and explicit callbacks).
+                notify_cb = None
+                flags = list(self.properties)
+                value = bytearray()  # Initial empty value; adjust if you need a default non-empty value
+
+                attempts = [
+                    {
+                        'args': (self.service, char_index, self.uuid, value, False, flags, read_cb, write_cb, notify_cb),
+                        'kwargs': {}
+                    },
+                    {
+                        'args': (char_index, self.uuid, flags, self.service),
+                        'kwargs': {}
+                    },
+                    {
+                        'args': (self.service, char_index, self.uuid, False, flags, read_cb, write_cb, notify_cb),
+                        'kwargs': {}
+                    },
+                    {
+                        'args': (),
+                        'kwargs': {
+                            'service': self.service,
+                            'index': char_index,
+                            'uuid': self.uuid,
+                            'notifying': False,
+                            'flags': flags,
+                            'read_callback': read_cb,
+                            'write_callback': write_cb,
+                            'notify_callback': notify_cb,
+                        }
+                    },
+                    {
+                        'args': (self.service, char_index, self.uuid, False, flags, read_cb, write_cb),
+                        'kwargs': {}
+                    },
+                    {
+                        'args': (self.service, char_index, self.uuid, False, flags),
+                        'kwargs': {}
+                    },
+                    {
+                        'args': (self.service, char_index, self.uuid, flags, read_cb, write_cb),
+                        'kwargs': {}
+                    },
+                    {
+                        'args': (self.service, char_index, self.uuid, flags),
+                        'kwargs': {}
+                    },
+                ]
+
+                last_error = None
+                for attempt in attempts:
+                    try:
+                        self.characteristic = localGATT.Characteristic(
+                            *attempt['args'], **attempt['kwargs']
+                        )
+                        break
+                    except TypeError as err:
+                        last_error = err
+                        continue
+                else:
+                    # All attempts failed
+                    raise CharacteristicError(
+                        f"localGATT.Characteristic signature mismatch: {last_error}"
+                    )
+
+                # Some bluezero releases expect callbacks to be assigned after creation
+                if read_cb and hasattr(self.characteristic, 'read_callback'):
+                    self.characteristic.read_callback = read_cb
+                if write_cb and hasattr(self.characteristic, 'write_callback'):
+                    self.characteristic.write_callback = write_cb
+
+                logger.debug(
+                    "Created characteristic %s via bluezero.localGATT (index=%s)",
+                    self.uuid,
+                    char_index,
+                )
+
+            else:
+                raise CharacteristicError(
+                    "No compatible BlueZero characteristic implementation available"
+                )
             
         except Exception as e:
             logger.error(f"Failed to create characteristic {self.uuid}: {e}")
             raise CharacteristicError(f"Failed to create characteristic: {e}")
-    
-    @abstractmethod
-    def _handle_read(self, options) -> bytes:
-        """Handle read operations - must be implemented by subclasses
-        
-        Args:
-            options: BLE read options
-            
-        Returns:
-            Binary data to return
-        """
-        pass
-    
-    def _handle_write(self, value: bytes, options):
-        """Handle write operations - override in subclasses if needed
-        
-        Args:
-            value: Binary data written
-            options: BLE write options
-        """
-        logger.warning(f"Write operation not implemented for {self.uuid}")
-    
-    def notify(self, data: bytes, device=None):
-        """Send notification to connected device(s)
-        
-        Args:
-            data: Binary data to send
-            device: Specific device to notify (None for all)
-        """
-        if self.simulation_mode or not self.characteristic:
-            logger.debug(f"Skipping notification for {self.uuid} (simulation/no characteristic)")
-            return
-            
-        if 'notify' not in self.properties:
-            logger.warning(f"Characteristic {self.uuid} does not support notifications")
-            return
-            
+    @classmethod
+    def _get_next_index_for_service(cls, service):
+        srv_id = service.srv_id
+        next_idx = cls._service_indices.get(srv_id, 1)
+        cls._service_indices[srv_id] = next_idx + 1
+        return next_idx
+
+    def _handle_read_with_logging(self, options=None):
+        if options is None:
+            options = {}
+        logger.info(f"📖 BLE READ: {self.uuid}")
         try:
-            if device:
-                self.characteristic.notify(data, device)
-            else:
-                self.characteristic.notify(data)
-                
+            result = self._handle_read(options)
+            length = len(result) if isinstance(result, (bytes, bytearray, list)) else 0
+            logger.debug(f"  ✓ Read {length} bytes")
+            return [b for b in result] if isinstance(result, (bytes, bytearray)) else result
         except Exception as e:
-            logger.error(f"Failed to send notification for {self.uuid}: {e}")
+            logger.error(f"  ✗ Read failed: {e}", exc_info=True)
+            raise
 
+    def _handle_write_with_logging(self, value, options=None):
+        if options is None:
+            options = {}
+        logger.info(f"✍️ BLE WRITE: {self.uuid} ({len(value)} bytes)")
+        try:
+            byte_value = bytes(value)  # value is list[int]
+            self._handle_write(byte_value, options)
+            logger.debug("  ✓ Write successful")
+        except Exception as e:
+            logger.error(f"  ✗ Write failed: {e}", exc_info=True)
+            raise
 
+    @abstractmethod
+    def _handle_read(self, options: dict) -> bytes:
+        pass
+
+    def _handle_write(self, value: bytes, options: dict):
+        logger.warning(f"Write not implemented for {self.uuid}")
+
+    def notify(self, data: bytes, device=None):
+        if self.simulation_mode or self.characteristic is None:
+            logger.debug(f"Skip notify (simulation/no char obj): {self.uuid}")
+            return
+        if device:
+            logger.warning("per-device notify not supported")
+        try:
+            self.characteristic.set_value(list(data))
+        except Exception as e:
+            logger.error(f"Notify failed {self.uuid}: {e}")
+
+# Subclasses unchanged
 class ReadOnlyCharacteristic(BaseCharacteristic):
-    """Base class for read-only characteristics"""
-    
     def __init__(self, uuid: str, service=None, simulation_mode: bool = False):
-        super().__init__(uuid, ['read'], service, simulation_mode)
-
+        super().__init__(uuid, ["read"], service, simulation_mode)
 
 class ReadWriteCharacteristic(BaseCharacteristic):
-    """Base class for read/write characteristics"""
-    
     def __init__(self, uuid: str, service=None, simulation_mode: bool = False):
-        super().__init__(uuid, ['read', 'write'], service, simulation_mode)
-
+        super().__init__(uuid, ["read", "write"], service, simulation_mode)
 
 class NotifyCharacteristic(BaseCharacteristic):
-    """Base class for notify characteristics"""
-    
     def __init__(self, uuid: str, service=None, simulation_mode: bool = False):
-        super().__init__(uuid, ['read', 'notify'], service, simulation_mode)
-
+        super().__init__(uuid, ["read", "notify"], service, simulation_mode)
 
 class WriteOnlyCharacteristic(BaseCharacteristic):
-    """Base class for write-only characteristics"""
-    
     def __init__(self, uuid: str, service=None, simulation_mode: bool = False):
-        super().__init__(uuid, ['write'], service, simulation_mode)
-    
-    def _handle_read(self, options) -> bytes:
-        """Write-only characteristics don't support read"""
-        logger.warning(f"Read attempted on write-only characteristic {self.uuid}")
-        return b'\x00'
+        super().__init__(uuid, ["write"], service, simulation_mode)
 
+    def _handle_read(self, options) -> list:
+        logger.warning(f"Read on write-only {self.uuid}")
+        return []
 
-# Export all classes
 __all__ = [
-    'BLEError', 'CharacteristicError', 'BaseCharacteristic',
-    'ReadOnlyCharacteristic', 'ReadWriteCharacteristic', 
-    'NotifyCharacteristic', 'WriteOnlyCharacteristic'
+    "BLEError", "CharacteristicError", "BaseCharacteristic",
+    "ReadOnlyCharacteristic", "ReadWriteCharacteristic",
+    "NotifyCharacteristic", "WriteOnlyCharacteristic"
 ]
