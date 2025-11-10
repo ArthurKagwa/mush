@@ -13,8 +13,111 @@ db = DatabaseManager()
 control_system = ControlSystem()
 stage_manager = StageManager()
 
+
+def get_sensor_data():
+    """Callback to get current sensor readings for BLE"""
+    reading = sensors.get_current_readings()
+    if reading:
+        return {
+            'temperature': reading.temperature_c,
+            'humidity': reading.humidity_percent,
+            'co2': reading.co2_ppm,
+            'light': reading.light_level
+        }
+    return None
+
+
+def get_control_data():
+    """Callback to get current control system data for BLE"""
+    status = control_system.get_status()
+    relay_states = status.get('relay_states', {})
+    
+    # Map relay states to boolean values for BLE
+    return {
+        'fan': relay_states.get('exhaust_fan', 'OFF') == 'ON',
+        'mist': relay_states.get('humidifier', 'OFF') == 'ON',
+        'light': relay_states.get('grow_light', 'OFF') == 'ON',
+        'heater': relay_states.get('heater', 'OFF') == 'ON',
+        'mode': status.get('mode', 'automatic')
+    }
+
+
+def set_control_targets(targets: dict):
+    """Callback to set control targets from BLE"""
+    logger.info(f"BLE control targets received: {targets}")
+    # TODO: Implement control target updates
+    # This would update thresholds in the control system
+
+
+def get_stage_data():
+    """Callback to get current stage data for BLE"""
+    status = stage_manager.get_status()
+    if status.get('configured', False):
+        # Map species names to IDs (simplified - could use a proper mapping)
+        species_map = {'Oyster': 1, 'Shiitake': 2, 'Lion\'s Mane': 3}
+        species_id = species_map.get(status.get('species', 'Oyster'), 0)
+        
+        # Map stage names to IDs (simplified)
+        stage_map = {'Incubation': 1, 'Pinning': 2, 'Fruiting': 3, 'Harvest': 4}
+        stage_id = stage_map.get(status.get('stage', 'Incubation'), 0)
+        
+        return {
+            'species': status.get('species', 'Unknown'),
+            'species_id': species_id,
+            'stage': status.get('stage', 'Init'),
+            'stage_id': stage_id,
+            'mode': status.get('mode', 'semi'),
+            'age_days': status.get('age_days', 0)
+        }
+    return None
+
+
+def set_stage_state(stage_data: dict):
+    """Callback to set stage state from BLE"""
+    logger.info(f"BLE stage state received: {stage_data}")
+    
+    # Extract species and stage from the data
+    species = stage_data.get('species', 'Oyster')
+    stage = stage_data.get('stage', 'Pinning')
+    
+    # Update stage manager
+    success = stage_manager.set_stage(species, stage)
+    
+    if success:
+        logger.info(f"Stage updated via BLE: {species}-{stage}")
+        
+        # Update light schedule based on new stage
+        light_schedule = stage_manager.get_light_schedule()
+        if light_schedule:
+            mode = light_schedule.get('mode', 'off')
+            on_minutes = light_schedule.get('on_minutes', 0)
+            off_minutes = light_schedule.get('off_minutes', 0)
+            control_system.update_light_schedule(mode, on_minutes, off_minutes)
+            logger.info(f"Light schedule updated: {mode}")
+    else:
+        logger.warning(f"Failed to update stage via BLE: {species}-{stage}")
+
+
+def apply_overrides(overrides: dict):
+    """Callback to apply manual overrides from BLE"""
+    logger.info(f"BLE overrides received: {overrides}")
+    # TODO: Implement override handling
+    # This would allow manual relay control via BLE
+
+
 def loop():
     """Main control loop"""
+    # Register BLE callbacks before starting service
+    ble_gatt.set_callbacks(
+        get_sensor_data=get_sensor_data,
+        get_control_data=get_control_data,
+        set_control_targets=set_control_targets,
+        get_stage_data=get_stage_data,
+        set_stage_state=set_stage_state,
+        apply_overrides=apply_overrides
+    )
+    logger.info("BLE callbacks registered")
+    
     # Start BLE GATT service
     if ble_gatt.start_ble_service():
         logger.info("BLE GATT service started")

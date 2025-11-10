@@ -3,7 +3,8 @@ import 'package:go_router/go_router.dart';
 
 /// Main scaffold with bottom navigation bar.
 ///
-/// Provides persistent bottom navigation across Farms, Monitoring, and Settings screens.
+/// Provides persistent bottom navigation across 5 main screens:
+/// Farms, Monitoring, Control, Stage, and Settings.
 /// Uses GoRouter's StatefulShellRoute for proper navigation state management.
 class MainScaffold extends StatelessWidget {
   const MainScaffold({
@@ -40,6 +41,18 @@ class MainScaffold extends StatelessWidget {
             selectedIcon: Icon(Icons.monitor_heart),
             label: 'Monitoring',
             tooltip: 'Monitor environmental conditions',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.tune_outlined),
+            selectedIcon: Icon(Icons.tune),
+            label: 'Control',
+            tooltip: 'Environmental control settings',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.timeline_outlined),
+            selectedIcon: Icon(Icons.timeline),
+            label: 'Stage',
+            tooltip: 'Growth stage management',
           ),
           NavigationDestination(
             icon: Icon(Icons.settings_outlined),

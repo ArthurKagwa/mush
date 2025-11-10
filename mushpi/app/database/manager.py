@@ -24,7 +24,13 @@ class DatabaseManager:
         
         # Ensure database path is absolute
         if not self.db_path.is_absolute():
-            self.db_path = config.paths.data_dir / self.db_path
+            # If path starts with 'data/', use it relative to project root, not data_dir
+            if str(self.db_path).startswith('data/'):
+                # Get project root (parent of mushpi directory)
+                project_root = Path(__file__).parent.parent.parent
+                self.db_path = project_root / self.db_path
+            else:
+                self.db_path = config.paths.data_dir / self.db_path
             
         # Create parent directory with proper permissions
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

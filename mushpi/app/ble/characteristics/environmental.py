@@ -25,11 +25,12 @@ class EnvironmentalMeasurementsCharacteristic(NotifyCharacteristic):
             service: BLE service object
             simulation_mode: Whether running in simulation mode
         """
-        super().__init__(ENV_MEASUREMENTS_UUID, service, simulation_mode)
-        
-        # Data and callbacks
+        # Data and callbacks must be set BEFORE calling super().__init__()
+        # because base class will call _handle_read() during initialization
         self.env_data = EnvironmentalData.create_empty()
         self.get_sensor_data: Optional[Callable] = None
+        
+        super().__init__(ENV_MEASUREMENTS_UUID, service, simulation_mode)
         
     def _handle_read(self, options) -> bytes:
         """Read callback for environmental measurements

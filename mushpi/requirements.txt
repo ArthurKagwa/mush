@@ -14,3 +14,6 @@ APScheduler>=3.10.0
 
 # Optional: environment variable support
 python-dotenv>=1.0.0
+
+# Milestone 2: dbus-next for BlueZ D-Bus backend skeleton
+dbus-next>=0.2.3

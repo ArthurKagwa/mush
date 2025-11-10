@@ -97,3 +97,14 @@ class DHT22Sensor(BaseSensor):
             -40 <= temp <= 80 and           # DHT22 temperature range
             0 <= humidity <= 100            # DHT22 humidity range
         )
+    
+    def cleanup(self) -> None:
+        """Cleanup DHT22 sensor resources"""
+        if self.sensor:
+            try:
+                self.sensor.exit()
+                logger.debug("DHT22 sensor cleanup completed")
+            except Exception as e:
+                logger.warning(f"DHT22 cleanup error: {e}")
+            finally:
+                self.sensor = None

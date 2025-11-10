@@ -152,6 +152,7 @@ class SensorManager:
         
     def _monitor_loop(self) -> None:
         """Background monitoring loop"""
+        logger.info("🔄 Monitoring loop started")
         while self.monitoring:
             try:
                 # Get current reading
@@ -160,9 +161,12 @@ class SensorManager:
                     logger.warning("No sensor reading obtained")
                     time.sleep(self.monitor_interval)
                     continue
-                    
+                
+                logger.debug(f"💾 Attempting to save reading to database: {reading.sensor_source}")
+                
                 # Save to database
                 self.db_manager.save_reading(reading)
+                logger.debug("✅ Reading saved to database")
                 
                 # Check thresholds
                 threshold_events = self.threshold_manager.check_thresholds(reading)
@@ -177,7 +181,7 @@ class SensorManager:
                 self._log_reading_status(reading, threshold_events)
                 
             except Exception as e:
-                logger.error(f"Error in sensor monitoring loop: {e}")
+                logger.error(f"Error in sensor monitoring loop: {e}", exc_info=True)
                 
             # Wait for next reading
             time.sleep(self.monitor_interval)
@@ -235,6 +239,23 @@ class SensorManager:
         
         # Cleanup sensors
         if self.scd41:
-            self.scd41.stop_measurement()
+            try:
+                self.scd41.stop_measurement()
+            except Exception as e:
+                logger.warning(f"SCD41 cleanup error: {e}")
+        
+        if self.dht22:
+            try:
+                self.dht22.cleanup()
+            except Exception as e:
+                logger.warning(f"DHT22 cleanup error: {e}")
+            
+        if self.light_sensor:
+            try:
+                # Light sensor doesn't need cleanup but check if method exists
+                if hasattr(self.light_sensor, 'cleanup'):
+                    self.light_sensor.cleanup()
+            except Exception as e:
+                logger.warning(f"Light sensor cleanup error: {e}")
             
         logger.info("Sensor manager shutdown complete")

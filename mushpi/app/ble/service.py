@@ -8,7 +8,9 @@ Manages service creation, characteristics, and coordination.
 import logging
 import threading
 import time
-from typing import Optional, Dict, Any, Callable, Set
+import os
+from typing import Optional, Dict, Any, Callable, Set, Tuple
+from queue import Queue, Empty
 
 try:
     from bluezero import adapter, peripheral
@@ -30,6 +32,7 @@ except Exception:
 
 from ..core.config import config
 from ..models.ble_dataclasses import StatusFlags
+from .backends import select_backend
 from .characteristics.environmental import EnvironmentalMeasurementsCharacteristic
 from .characteristics.control_targets import ControlTargetsCharacteristic
 from .characteristics.stage_state import StageStateCharacteristic
@@ -48,7 +51,7 @@ class BLEServiceError(Exception):
 
 class BLEGATTServiceManager:
     """BLE GATT service manager for MushPi telemetry"""
-    
+
     def __init__(self):
         """Initialize BLE GATT service manager"""
         self.config = config
@@ -58,26 +61,46 @@ class BLEGATTServiceManager:
         self.uart_service = None
         self.characteristics = {}
         self.simulation_mode = self.config.development.simulation_mode
-        
+
         # Thread safety
         self._lock = threading.Lock()
         self._running = False
-        
+
         # Service state
         self.start_time = 0
-        
+
         # Advertisement state
         self._advertisement_registered = False
         self._advertisement_path = None
-        self._advertisement_obj = None
-        
+
+        # GLib mainloop (required for BlueZero/D-Bus)
+        self._mainloop = None
+        self._mainloop_thread = None
+
+        # Non-blocking notification infrastructure
+        self._notify_queue: Optional[Queue] = None
+        self._publisher_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._queue_metrics = {
+            'dropped': 0,
+            'coalesced': 0,
+            'published': 0,
+            'slow_publishes': 0
+        }
+
+        # Load BLE queue related configuration from environment (no hard-coded values)
+        self._ble_cfg = self._load_ble_env_config()
+
+        # Backend selection (Milestone 1: null backend placeholder)
+        self._backend_name, self._backend = select_backend()
+
         # In simulation mode we still need characteristic containers for callbacks
         if self.simulation_mode:
             self._build_characteristics(service=None)
         
     def initialize(self) -> bool:
-        """Initialize BLE adapter and service
-        
+        """Initialize BLE adapter and services.
+
         Returns:
             True if initialization successful, False otherwise
         """
@@ -85,12 +108,16 @@ class BLEGATTServiceManager:
             logger.info("BLE GATT service running in simulation mode")
             self._running = True
             return True
-            
+
         if not BLE_AVAILABLE:
             logger.warning("BlueZero not available - BLE GATT service disabled")
             return False
-            
+
         try:
+            # Start GLib mainloop in background thread (required for BlueZero/D-Bus)
+            if DBUS_AVAILABLE and not self._mainloop_thread:
+                self._start_mainloop()
+
             # Initialize BLE adapter
             self.adapter = adapter.Adapter()
             if not self.adapter.powered:
@@ -98,16 +125,60 @@ class BLEGATTServiceManager:
 
             # Create peripheral
             self.peripheral = peripheral.Peripheral(self.adapter.address, local_name=self.config.bluetooth.name_prefix)
-                
+
             # Create GATT services
             self._create_services()
-            
+
+            # Initialize selected backend (no-op for milestone 1)
+            try:
+                self._backend.initialize()
+            except Exception as be:
+                logger.debug(f"Backend initialize error (ignored milestone 1): {be}")
+
             logger.info("BLE GATT services initialized successfully")
             return True
-            
+
+        except KeyboardInterrupt:
+            logger.warning("⚠️  BLE initialization interrupted by user")
+            return False
         except Exception as e:
             logger.error(f"Failed to initialize BLE GATT service: {e}")
             return False
+    
+    def _start_mainloop(self):
+        """Start GLib mainloop in background thread
+        
+        BlueZero requires the GLib mainloop to process D-Bus messages.
+        Without this, peripheral.publish() and other D-Bus calls will block indefinitely.
+        """
+        if not DBUS_AVAILABLE:
+            return
+            
+        try:
+            # Initialize D-Bus mainloop
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            
+            # Create GLib mainloop
+            self._mainloop = GLib.MainLoop()
+            
+            # Start mainloop in background thread
+            def run_mainloop():
+                try:
+                    logger.info("🔄 GLib mainloop started in background")
+                    self._mainloop.run()
+                    logger.info("🔄 GLib mainloop stopped")
+                except Exception as e:
+                    logger.error(f"GLib mainloop error: {e}")
+            
+            self._mainloop_thread = threading.Thread(target=run_mainloop, daemon=True, name="GLibMainLoop")
+            self._mainloop_thread.start()
+            
+            # Give mainloop a moment to start
+            time.sleep(0.5)
+            
+            logger.info("✓ GLib mainloop initialized")
+        except Exception as e:
+            logger.warning(f"Could not start GLib mainloop: {e}")
     
     def _create_services(self):
         """Create BLE GATT services and register characteristics"""
@@ -148,15 +219,71 @@ class BLEGATTServiceManager:
             # Bind characteristics to the newly created services so BlueZero can register them
             self._build_characteristics(main_service=self.service, uart_service=self.uart_service)
 
+            # Initialize characteristics with default values to prevent empty initial notifications
+            self._initialize_characteristic_values()
+
             # Count successfully created characteristics
             char_count = len(self.characteristics)
             logger.info(f"BLE GATT services ready with {char_count} characteristics")
             
             # CRITICAL: Publish the GATT server to BlueZ so services become discoverable
-            logger.info("Publishing GATT server to BlueZ...")
-            self.peripheral.publish()
-            logger.info("✓ GATT server published - services now discoverable")
+            # NOTE: This call can block for several minutes if BlueZ's advertisement registration hangs
+            # We run it in a background thread with a timeout to avoid blocking startup
+            logger.info("Publishing GATT server to BlueZ (timeout: 10s)...")
             
+            publish_success = False
+            publish_thread = None
+            
+            def publish_in_thread():
+                nonlocal publish_success
+                try:
+                    self.peripheral.publish()
+                    publish_success = True
+                except Exception as e:
+                    logger.debug(f"Publish thread error: {e}")
+            
+            try:
+                # Run publish in background thread with timeout
+                publish_thread = threading.Thread(target=publish_in_thread, daemon=True)
+                publish_thread.start()
+                publish_thread.join(timeout=10)  # Wait max 10 seconds
+                
+                if publish_thread.is_alive():
+                    # Thread still running after timeout - publish is hanging
+                    logger.warning("⚠️  GATT server publish timed out after 10s")
+                    logger.info("ℹ️  This is likely due to BlueZ advertisement registration blocking")
+                    logger.info("ℹ️  Services may still be discoverable via adapter configuration")
+                    # Thread will continue in background but we don't wait for it
+                elif publish_success:
+                    logger.info("✓ GATT server published - services now discoverable")
+                else:
+                    logger.warning("⚠️  GATT server publish failed")
+                    logger.info("ℹ️  Continuing anyway - adapter is configured and discoverable")
+                
+                # NOTE: BlueZ may print "Failed to register advertisement" to stderr during publish()
+                # This is a known BlueZ behavior and can be safely ignored - it refers to BlueZ's
+                # internal LE advertisement mechanism, not the GATT server itself. The GATT server
+                # is successfully registered and fully functional. Clients can discover services
+                # via standard GATT service discovery regardless of this message.
+                
+            except KeyboardInterrupt:
+                # User pressed Ctrl+C during publish - re-raise to allow clean shutdown
+                logger.warning("⚠️  Service initialization interrupted by user")
+                raise
+            except Exception as e:
+                # Publish failed but we can continue - adapter is configured and services are created
+                logger.warning(f"⚠️  Error during GATT server publish: {e}")
+                logger.info("ℹ️  Continuing anyway - adapter is configured and discoverable")
+            
+            # Initialize notification worker AFTER publish attempt (so peripheral exists)
+            try:
+                self._init_notification_worker()
+            except Exception as e:
+                logger.warning(f"Could not start BLE notification worker (continuing): {e}")
+
+        except KeyboardInterrupt:
+            # Re-raise KeyboardInterrupt to allow main program to handle shutdown
+            raise
         except Exception as e:
             logger.error(f"Failed to create BLE GATT services: {e}")
             raise BLEServiceError(f"Failed to create services: {e}")
@@ -199,6 +326,33 @@ class BLEGATTServiceManager:
             logger.error(f"Failed to create characteristics: {e}")
             raise BLEServiceError(f"Failed to create characteristics: {e}")
     
+    def _initialize_characteristic_values(self):
+        """Initialize characteristics with default zero values
+        
+        This ensures that when clients first subscribe to notifications,
+        they receive valid data packets instead of empty arrays.
+        """
+        try:
+            # Initialize environmental measurements with zeros
+            env_char = self.characteristics.get('env_measurements')
+            if env_char:
+                env_char.update_data(
+                    temp=0.0,
+                    rh=0.0,
+                    co2=0,
+                    light=0,
+                    start_time=time.time()
+                )
+                logger.debug("✓ Environmental characteristic initialized with zero values")
+            
+            # Status flags already initialize with proper values in __init__
+            status_char = self.characteristics.get('status_flags')
+            if status_char:
+                logger.debug(f"✓ Status flags initialized: 0x{int(status_char.status_flags):04X}")
+            
+        except Exception as e:
+            logger.warning(f"Could not initialize characteristic values: {e}")
+    
     def start(self) -> bool:
         """Start BLE GATT service and advertising
         
@@ -237,15 +391,19 @@ class BLEGATTServiceManager:
             # Optional: register a LE Advertisement via D-Bus to include service UUID in scan data
             # This is NOT required for service discovery to work (GATT server is already published)
             # It only adds the service UUID to the advertisement packet for faster filtering
+            # If this fails, the service will still be discoverable via standard GATT service discovery
             if DBUS_AVAILABLE:
                 try:
+                    # Use a shorter timeout (5s instead of 60s) to avoid blocking startup
                     self._register_dbus_advertisement(advertising_name)
                 except dbus.exceptions.DBusException as e:
                     # Advertisement registration can fail if already registered or BlueZ busy
                     # This is OK - GATT server is published, service discovery will work fine
                     logger.info("ℹ️  D-Bus advertisement not registered (not critical)")
+                    logger.info("ℹ️  BLE service is still fully functional - clients can discover via GATT")
                     logger.debug(f"D-Bus advertisement error: {e}")
                 except Exception as e:
+                    logger.info("ℹ️  D-Bus advertisement failed (continuing anyway)")
                     logger.debug(f"D-Bus advertisement error: {e}")
             else:
                 logger.debug("DBus not available; skipping advertisement registration")
@@ -266,12 +424,23 @@ class BLEGATTServiceManager:
     def stop(self):
         """Stop BLE GATT service and advertising"""
         self._running = False
+        # Signal worker stop early
+        self._stop_event.set()
         
         if self.simulation_mode:
             logger.info("BLE GATT service stopped (simulation mode)")
             return
             
         try:
+            # Stop publisher thread
+            if self._publisher_thread and self._publisher_thread.is_alive():
+                timeout_sec = self._ble_cfg['shutdown_timeout_ms'] / 1000.0
+                logger.info("Stopping BLE notification worker...")
+                self._publisher_thread.join(timeout=timeout_sec)
+                if self._publisher_thread.is_alive():
+                    logger.warning("BLE notification worker did not stop within timeout")
+                else:
+                    logger.info("BLE notification worker stopped")
             # Stop GATT application
             if hasattr(self, 'app') and self.app:
                 try:
@@ -289,6 +458,13 @@ class BLEGATTServiceManager:
             if self.adapter:
                 # Stop advertising
                 self.adapter.discoverable = False
+            
+            # Stop GLib mainloop
+            if self._mainloop and self._mainloop.is_running():
+                logger.info("Stopping GLib mainloop...")
+                self._mainloop.quit()
+                if self._mainloop_thread and self._mainloop_thread.is_alive():
+                    self._mainloop_thread.join(timeout=2)
                     
             logger.info("BLE GATT service stopped")
             
@@ -398,10 +574,10 @@ class BLEGATTServiceManager:
             if env_char:
                 env_char.update_data(temp, rh, co2, light, self.start_time)
                 if connected_devices:
-                    env_char.notify_update(connected_devices)
-                    
+                    # Enqueue notification task (characteristic name + snapshot of devices)
+                    self._enqueue_notification('env_measurements', connected_devices)
         except Exception as e:
-            logger.error(f"Error notifying environmental data: {e}")
+            logger.error(f"Error queuing environmental data notification: {e}")
     
     def update_status_flags(self, flags: StatusFlags, connected_devices: Set[str]):
         """Update system status flags and notify clients
@@ -415,10 +591,9 @@ class BLEGATTServiceManager:
             if status_char:
                 status_char.update_flags(flags, connected_devices)
                 if connected_devices:
-                    status_char.notify_update(connected_devices)
-                    
+                    self._enqueue_notification('status_flags', connected_devices)
         except Exception as e:
-            logger.error(f"Error updating status flags: {e}")
+            logger.error(f"Error queuing status flags notification: {e}")
     
     def is_running(self) -> bool:
         """Check if BLE GATT service is running
@@ -484,6 +659,10 @@ class BLEGATTServiceManager:
         logger.info(f"D-Bus Advertisement:    {'Registered' if status['dbus_advertisement_registered'] else 'Not Registered'}")
         logger.info(f"Uptime:                 {status['uptime_seconds']}s")
         logger.info("=" * 60)
+
+        # Log queue metrics if worker active
+        if self._notify_queue is not None:
+            logger.info(f"Queue size: {self._notify_queue.qsize()} | Published: {self._queue_metrics['published']} | Dropped: {self._queue_metrics['dropped']} | Coalesced: {self._queue_metrics['coalesced']} | Slow publishes: {self._queue_metrics['slow_publishes']}")
 
 
     # ----------------------- D-Bus advertisement helpers -----------------------
@@ -643,14 +822,15 @@ class BLEGATTServiceManager:
             except Exception as e:
                 logger.debug(f"Error during cleanup: {e}")
 
-            # Register new advertisement with extended timeout
+            # Register new advertisement with short timeout to avoid blocking startup
             logger.debug(f"Registering advertisement at {ad_path}")
             # BlueZ RegisterAdvertisement signature: "oa{sv}" (object_path, dict<string,variant>)
             # Must explicitly create a D-Bus dictionary with proper signature to avoid
             # "Unable to guess signature from an empty dict" error
             # Must also use dbus.ObjectPath() to ensure correct signature
+            # Use 5-second timeout instead of 60 to avoid blocking startup
             options = dbus.Dictionary({}, signature='sv')
-            ad_manager.RegisterAdvertisement(dbus.ObjectPath(advertisement.path), options, timeout=60)
+            ad_manager.RegisterAdvertisement(dbus.ObjectPath(advertisement.path), options, timeout=5)
 
             # Save references for unregister
             self._advertisement_obj = advertisement
@@ -720,6 +900,139 @@ class BLEGATTServiceManager:
             
         except Exception as e:
             logger.debug(f"Error during advertisement cleanup: {e}")
+
+    # ----------------------- Non-blocking notification worker -----------------------
+    def _load_ble_env_config(self) -> Dict[str, int | str | bool]:
+        """Load BLE notification related configuration from environment variables.
+
+        Returns:
+            Dict of configuration values (all validated/fallback to defaults)
+        """
+        def _get_int(name: str, default: int) -> int:
+            val = os.environ.get(name, str(default))
+            try:
+                return int(val)
+            except ValueError:
+                logger.warning(f"Invalid int for {name}={val}; using default {default}")
+                return default
+
+        def _get_str(name: str, default: str, allowed: Optional[Set[str]] = None) -> str:
+            val = os.environ.get(name, default)
+            if allowed and val not in allowed:
+                logger.warning(f"Invalid value for {name}={val}; allowed={allowed}; using {default}")
+                return default
+            return val
+
+        def _get_bool(name: str, default: bool) -> bool:
+            val = os.environ.get(name, str(default))
+            return str(val).lower() in ('true', '1', 'yes', 'on')
+
+        return {
+            'queue_max_size': _get_int('MUSHPI_BLE_QUEUE_MAX_SIZE', 64),
+            'queue_put_timeout_ms': _get_int('MUSHPI_BLE_QUEUE_PUT_TIMEOUT_MS', 10),
+            'backpressure_policy': _get_str('MUSHPI_BLE_BACKPRESSURE_POLICY', 'drop_oldest', {'drop_oldest', 'drop_newest', 'coalesce'}),
+            'publish_timeout_ms': _get_int('MUSHPI_BLE_PUBLISH_TIMEOUT_MS', 2000),
+            'publish_max_retries': _get_int('MUSHPI_BLE_PUBLISH_MAX_RETRIES', 2),
+            'publish_backoff_base_ms': _get_int('MUSHPI_BLE_PUBLISH_BACKOFF_BASE_MS', 100),
+            'publish_backoff_max_ms': _get_int('MUSHPI_BLE_PUBLISH_BACKOFF_MAX_MS', 1000),
+            'log_slow_publish_ms': _get_int('MUSHPI_BLE_LOG_SLOW_PUBLISH_MS', 250),
+            'shutdown_timeout_ms': _get_int('MUSHPI_BLE_SHUTDOWN_TIMEOUT_MS', 1500),
+            'worker_restart': _get_bool('MUSHPI_BLE_WORKER_RESTART', False)
+        }
+
+    def _init_notification_worker(self):
+        """Initialize queue and start publisher worker thread"""
+        if self.simulation_mode:
+            logger.debug("Skipping notification worker init (simulation mode)")
+            return
+        if self._notify_queue is None:
+            self._notify_queue = Queue(maxsize=self._ble_cfg['queue_max_size'])
+        if self._publisher_thread and self._publisher_thread.is_alive():
+            return
+
+        def _worker():
+            logger.info("BLE notification worker started")
+            while not self._stop_event.is_set():
+                try:
+                    item = self._notify_queue.get(timeout=0.25)
+                except Empty:
+                    continue
+                try:
+                    char_name, devices_snapshot, enqueue_ts = item
+                    start_ts = time.time()
+                    self._process_notification(char_name, devices_snapshot)
+                    duration_ms = int((time.time() - start_ts) * 1000)
+                    if duration_ms > self._ble_cfg['log_slow_publish_ms']:
+                        self._queue_metrics['slow_publishes'] += 1
+                        logger.warning(f"Slow BLE publish: {duration_ms}ms for {char_name}")
+                    self._queue_metrics['published'] += 1
+                except Exception as e:
+                    logger.error(f"Worker error processing notification: {e}")
+                finally:
+                    self._notify_queue.task_done()
+            logger.info("BLE notification worker exiting")
+
+        self._publisher_thread = threading.Thread(target=_worker, name="BLEPublisher", daemon=True)
+        self._publisher_thread.start()
+
+    def _enqueue_notification(self, char_name: str, devices: Set[str]):
+        """Enqueue a notification task with backpressure handling.
+
+        Args:
+            char_name: characteristic key in self.characteristics
+            devices: set of connected device addresses
+        """
+        if self.simulation_mode:
+            return
+        if not self._notify_queue:
+            return
+        task: Tuple[str, Set[str], float] = (char_name, set(devices), time.time())
+        try:
+            self._notify_queue.put(task, timeout=self._ble_cfg['queue_put_timeout_ms']/1000.0)
+        except Exception:
+            # Queue full or put timeout: apply backpressure policy
+            policy = self._ble_cfg['backpressure_policy']
+            if policy == 'drop_newest':
+                self._queue_metrics['dropped'] += 1
+                logger.debug(f"Drop newest notification ({char_name}) queue full")
+                return
+            elif policy == 'drop_oldest':
+                try:
+                    oldest = self._notify_queue.get_nowait()
+                    self._notify_queue.task_done()
+                    self._queue_metrics['dropped'] += 1
+                    logger.debug("Dropped oldest notification to make room")
+                except Empty:
+                    logger.debug("Queue empty unexpectedly during drop_oldest policy")
+                try:
+                    self._notify_queue.put(task, timeout=0.01)
+                except Exception:
+                    self._queue_metrics['dropped'] += 1
+                    logger.debug("Still could not enqueue after dropping oldest")
+            elif policy == 'coalesce':
+                # Simple coalesce: if same char already queued, skip adding new
+                # (Note: Queue lacks direct iteration removal; implement by counting skip)
+                self._queue_metrics['coalesced'] += 1
+                logger.debug(f"Coalesced notification for {char_name} (queue full)")
+            else:
+                self._queue_metrics['dropped'] += 1
+                logger.debug(f"Unknown backpressure policy {policy}; dropped newest")
+
+    def _process_notification(self, char_name: str, devices: Set[str]):
+        """Process a single queued notification task"""
+        char = self.characteristics.get(char_name)
+        if not char or not devices:
+            return
+        try:
+            # For BlueZero peripheral API, updating characteristic value triggers notify
+            # Here we call characteristic-specific notify_update if it exists for consistency
+            if hasattr(char, 'notify_update'):
+                char.notify_update(devices)
+            else:
+                logger.debug(f"Characteristic {char_name} lacks notify_update method")
+        except Exception as e:
+            logger.error(f"Error notifying {char_name}: {e}")
+
 
 
 # Export main class

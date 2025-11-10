@@ -73,12 +73,22 @@ class BaseCharacteristic(ABC):
             write_cb = self._handle_write_with_logging if 'write' in self.properties else None
             notify_cb = self._handle_notify_callback if 'notify' in self.properties else None
 
+            # Get initial value from read handler (if available)
+            initial_value = []
+            if read_cb:
+                try:
+                    initial_value = read_cb({})
+                    logger.debug(f"  Initial value: {len(initial_value) if isinstance(initial_value, list) else 0} bytes")
+                except Exception as e:
+                    logger.warning(f"  Could not get initial value: {e}")
+                    initial_value = []
+
             # Use peripheral.add_characteristic() API
             periph.add_characteristic(
                 srv_id=srv_id,
                 chr_id=chr_id,
                 uuid=self.uuid,
-                value=[],  # Start with empty value
+                value=initial_value,  # Use initial value from read handler
                 notifying=False,
                 flags=self.properties,
                 read_callback=read_cb,

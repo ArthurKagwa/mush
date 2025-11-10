@@ -18,13 +18,119 @@
 
 ### 📋 CURRENT STATUS
 
-**Latest Update:** November 6, 2025 - Single Source of Truth for Connection Status  
-**Status:** ✅ Complete - All status displays now consistent + BLE packet logging  
-**Next:** Test complete data flow from Pi → BLE → Database → UI
+**Latest Update:** November 9, 2025 - Control and Stage Tabs Implementation  
+**Status:** ✅ Complete - 5-tab navigation with comprehensive control interfaces  
+**Next:** Test control flows with actual Pi device, add preset templates
 
 ---
 
 ## Recent Changes
+
+### 2025-11-09 - Control and Stage Tabs Implementation ✅
+**What Changed:**
+- **Added Control Screen** - Comprehensive environmental control interface
+  - Temperature range (min/max sliders)
+  - Humidity minimum slider
+  - CO₂ maximum slider
+  - Light mode selector (OFF/ON/CYCLE)
+  - Light timing inputs (hours/minutes for CYCLE mode)
+  - Manual override switches (Light, Fan, Mist, Heater)
+  - Disable automation master switch
+  - Batch send via "Apply Changes" button
+
+- **Added Stage Screen** - Growth stage management interface
+  - Automation mode selector (FULL/SEMI/MANUAL)
+  - Species selector (Oyster/Shiitake/Lion's Mane)
+  - Growth stage selector (Incubation/Pinning/Fruiting)
+  - Expected duration input
+  - Stage progress display with progress bar
+  - Stage guidelines with contextual help
+  - Batch send via "Update Stage" button
+
+- **Updated Navigation to 5 Tabs**
+  - Farms (existing)
+  - Monitoring (existing)
+  - Control (NEW)
+  - Stage (NEW)
+  - Settings (existing)
+
+**Files Created:**
+- `lib/screens/control_screen.dart` (720+ lines)
+- `lib/screens/stage_screen.dart` (660+ lines)
+
+**Files Modified:**
+- `lib/widgets/main_scaffold.dart` - Added Control and Stage nav destinations
+- `lib/app.dart` - Added `/control` and `/stage` routes
+
+**Technical Details:**
+
+**Control Screen Features:**
+```dart
+// Environmental Parameters
+- Temperature Range: -20°C to 60°C (min/max)
+- Humidity Minimum: 0% to 100%
+- CO₂ Maximum: 0 to 10,000 ppm
+- Light Mode: OFF/ON/CYCLE
+- Light Timing: Hours + Minutes input
+
+// Manual Overrides
+- Light Override (bit 0)
+- Fan Override (bit 1)
+- Mist Override (bit 2)
+- Heater Override (bit 3)
+- Disable Auto (bit 7)
+
+// BLE Integration
+await bleOps.readControlTargets();     // Load settings
+await bleOps.writeControlTargets(data); // Apply settings
+await bleOps.writeOverrideBits(bits);   // Apply overrides
+```
+
+**Stage Screen Features:**
+```dart
+// Stage Parameters
+- Automation Mode: FULL/SEMI/MANUAL
+- Species: Oyster/Shiitake/Lion's Mane
+- Stage: Incubation/Pinning/Fruiting
+- Expected Days: Integer input
+
+// Progress Display
+- Days in stage: "5 / 14 days"
+- Progress bar: Visual 0-100%
+- Stage started: Formatted timestamp
+- Guidelines: Species-specific advice
+
+// BLE Integration
+await bleOps.readStageState();      // Load state
+await bleOps.writeStageState(data); // Update stage
+```
+
+**Batch Send Pattern:**
+1. User modifies multiple parameters
+2. Changes tracked in local state (_hasChanges flag)
+3. "Apply Changes" button appears at bottom
+4. User taps button
+5. All changes validated
+6. Single BLE write operation
+7. Success/error feedback
+
+**Smart Features:**
+- Auto-loads current settings from device
+- Real-time validation (temp min < max, etc.)
+- Species-specific default durations
+- Progress tracking with visual indicators
+- Farm selector for multi-farm setups
+- Connection status warnings
+- Auto-dismiss success messages
+
+**Impact:**
+- ✅ Complete control over all farm parameters
+- ✅ Reduces BLE traffic with batch updates
+- ✅ User-friendly with clear feedback
+- ✅ Supports multiple farms
+- ✅ Offline-safe (only writes when connected)
+
+---
 
 ### 2025-11-06 - Single Source of Truth for Connection Status + BLE Packet Logging ✅
 **What Changed:**

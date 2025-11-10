@@ -10,6 +10,8 @@ import 'providers/auto_reconnect_provider.dart';
 import 'screens/splash_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/monitoring_screen.dart';
+import 'screens/control_screen.dart';
+import 'screens/stage_screen.dart';
 import 'screens/farm_detail_screen.dart';
 import 'screens/device_scan_screen.dart';
 import 'screens/settings_screen.dart';
@@ -150,6 +152,28 @@ final routerProvider = Provider<GoRouter>((ref) {
                 path: '/monitoring',
                 name: 'monitoring',
                 builder: (context, state) => const MonitoringScreen(),
+              ),
+            ],
+          ),
+
+          // Control tab
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/control',
+                name: 'control',
+                builder: (context, state) => const ControlScreen(),
+              ),
+            ],
+          ),
+
+          // Stage tab
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/stage',
+                name: 'stage',
+                builder: (context, state) => const StageScreen(),
               ),
             ],
           ),

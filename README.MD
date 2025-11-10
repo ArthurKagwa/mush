@@ -7,6 +7,7 @@ Phase 2 covers on-device logic: sensors, hysteresis control, stage-aware thresho
 
 ## Features
 
+### Backend (Raspberry Pi)
 * Sensors: **SCD41** (CO₂, Temp, RH), **DHT22** fallback (Temp, RH), **ADS1115** + photoresistor (light level)
 * Actuators: **Humidifier (MIST)**, **Fan (VENT)**, **Light**, optional **Heater**
 * Control policy with hysteresis, duty-cycle caps, and condensation guard
@@ -14,6 +15,25 @@ Phase 2 covers on-device logic: sensors, hysteresis control, stage-aware thresho
 * Local persistence (SQLite) for readings, actions, alerts, inspections
 * **BLE GATT** for live telemetry + config writes
 * Runs as a **systemd** service; designed for Pi Zero 2 W / Pi 3+
+
+### Mobile App (Flutter)
+* **5-Tab Navigation**: Farms, Monitoring, Control, Stage, Settings
+* **Real-time Monitoring**: Live environmental data with color-coded indicators
+* **Comprehensive Control**: 
+  - Temperature range (min/max)
+  - Humidity minimum
+  - CO₂ maximum
+  - Light mode (OFF/ON/CYCLE) with timing
+  - Manual relay overrides (Light, Fan, Mist, Heater)
+  - Batch send to reduce BLE traffic
+* **Stage Management**:
+  - Automation mode selection (FULL/SEMI/MANUAL)
+  - Species selection (Oyster/Shiitake/Lion's Mane)
+  - Growth stage tracking (Incubation/Pinning/Fruiting)
+  - Progress visualization with guidelines
+* **Multi-Farm Support**: Manage multiple grow chambers
+* **BLE Communication**: Direct device-to-device control via Bluetooth
+* **Offline-First**: Local database with automatic sync
 
 ---
 
