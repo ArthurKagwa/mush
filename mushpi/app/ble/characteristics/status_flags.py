@@ -25,10 +25,11 @@ class StatusFlagsCharacteristic(NotifyCharacteristic):
             service: BLE service object
             simulation_mode: Whether running in simulation mode
         """
-        super().__init__(STATUS_FLAGS_UUID, service, simulation_mode)
-        
-        # Data
+        # Data must be set BEFORE calling super().__init__() 
+        # because base class will call _handle_read() during initialization
         self.status_flags = StatusFlags.SIMULATION if simulation_mode else 0
+        
+        super().__init__(STATUS_FLAGS_UUID, service, simulation_mode)
         
     def _handle_read(self, options) -> bytes:
         """Read callback for status flags

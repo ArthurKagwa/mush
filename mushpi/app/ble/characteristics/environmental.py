@@ -25,11 +25,12 @@ class EnvironmentalMeasurementsCharacteristic(NotifyCharacteristic):
             service: BLE service object
             simulation_mode: Whether running in simulation mode
         """
-        super().__init__(ENV_MEASUREMENTS_UUID, service, simulation_mode)
-        
-        # Data and callbacks
+        # Data and callbacks must be set BEFORE calling super().__init__()
+        # because base class will call _handle_read() during initialization
         self.env_data = EnvironmentalData.create_empty()
         self.get_sensor_data: Optional[Callable] = None
+        
+        super().__init__(ENV_MEASUREMENTS_UUID, service, simulation_mode)
         
     def _handle_read(self, options) -> bytes:
         """Read callback for environmental measurements
@@ -70,15 +71,25 @@ class EnvironmentalMeasurementsCharacteristic(NotifyCharacteristic):
             start_time: System start time for uptime calculation
         """
         # Update environmental data
-        self.env_data.co2_ppm = co2 if co2 is not None else 0
+        # Cast CO2 and light defensively to int to avoid float propagation
+        self.env_data.co2_ppm = int(co2) if co2 is not None else 0
         self.env_data.temp_x10 = int(temp * 10) if temp is not None else 0
         self.env_data.rh_x10 = int(rh * 10) if rh is not None else 0
-        self.env_data.light_raw = light if light is not None else 0
+        self.env_data.light_raw = int(light) if light is not None else 0
         self.env_data.update_uptime(start_time)
         
         uptime_sec = self.env_data.uptime_ms // 1000
         logger.info(f"BLE advertising readings: T={temp}°C, RH={rh}%, "
                    f"CO2={co2}ppm, Light={light} (uptime: {uptime_sec}s)")
+
+        # Immediately update underlying characteristic value so any subscribed
+        # clients (or late subscriptions) see the latest payload. This triggers
+        # BlueZero's notify mechanism via BaseCharacteristic.notify() implementation.
+        try:
+            packed = EnvironmentalSerializer.pack(self.env_data)
+            self.notify(packed)
+        except Exception as e:
+            logger.debug(f"Env value update notify failed: {e}")
     
     def _update_from_sensor_data(self, sensor_data):
         """Update from sensor data callback result

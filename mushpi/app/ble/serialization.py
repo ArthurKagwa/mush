@@ -31,6 +31,49 @@ class EnvironmentalSerializer:
     FORMAT = '<HhHHI'  # u16, s16, u16, u16, u32 (little-endian)
     SIZE = 12  # bytes
     
+    @staticmethod
+    def _to_int(value, default=0) -> int:
+        """Best-effort conversion to int with a default for None/invalid.
+        Avoids raising on float/None inputs.
+        """
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
+
+    @classmethod
+    def _u16(cls, value) -> int:
+        """Clamp to unsigned 16-bit range [0..65535] without hard coding limits."""
+        lo, hi = 0, (1 << 16) - 1
+        x = cls._to_int(value, 0)
+        if x < lo:
+            return lo
+        if x > hi:
+            return hi
+        return x
+
+    @classmethod
+    def _i16(cls, value) -> int:
+        """Clamp to signed 16-bit range [-32768..32767] without hard coding limits."""
+        lo, hi = -(1 << 15), (1 << 15) - 1
+        x = cls._to_int(value, 0)
+        if x < lo:
+            return lo
+        if x > hi:
+            return hi
+        return x
+
+    @classmethod
+    def _u32(cls, value) -> int:
+        """Clamp to unsigned 32-bit range [0..4294967295] without hard coding limits."""
+        lo, hi = 0, (1 << 32) - 1
+        x = cls._to_int(value, 0)
+        if x < lo:
+            return lo
+        if x > hi:
+            return hi
+        return x
+    
     @classmethod
     def pack(cls, data: EnvironmentalData) -> bytes:
         """Pack environmental data to binary format
@@ -49,13 +92,14 @@ class EnvironmentalSerializer:
             Packed binary data (12 bytes)
         """
         try:
-            return struct.pack(cls.FORMAT,
-                data.co2_ppm,
-                data.temp_x10,
-                data.rh_x10,
-                data.light_raw,
-                data.uptime_ms
-            )
+            # Coerce and clamp all fields to their protocol integer ranges
+            co2 = cls._u16(getattr(data, 'co2_ppm', 0))
+            temp = cls._i16(getattr(data, 'temp_x10', 0))
+            rh = cls._u16(getattr(data, 'rh_x10', 0))
+            light = cls._u16(getattr(data, 'light_raw', 0))
+            uptime = cls._u32(getattr(data, 'uptime_ms', 0))
+
+            return struct.pack(cls.FORMAT, co2, temp, rh, light, uptime)
         except Exception as e:
             logger.error(f"Error packing environmental data: {e}")
             raise SerializationError(f"Failed to pack environmental data: {e}")
@@ -338,29 +382,57 @@ class DataConverter:
         targets = ControlTargets.create_default()
         
         try:
-            # Update from threshold data
-            if 'temp_min' in data:
-                targets.temp_min_x10 = int(data['temp_min'] * 10)
-            if 'temp_max' in data:
-                targets.temp_max_x10 = int(data['temp_max'] * 10)
-            if 'rh_min' in data:
-                targets.rh_min_x10 = int(data['rh_min'] * 10)
-            if 'co2_max' in data:
-                targets.co2_max = int(data['co2_max'])
-                
-            # Update from light schedule data
+            # Update from threshold data with safe coercion
+            if 'temp_min' in data and data['temp_min'] is not None:
+                try:
+                    targets.temp_min_x10 = int(float(data['temp_min']) * 10)
+                except Exception:
+                    logger.warning("Invalid temp_min value; keeping default")
+            if 'temp_max' in data and data['temp_max'] is not None:
+                try:
+                    targets.temp_max_x10 = int(float(data['temp_max']) * 10)
+                except Exception:
+                    logger.warning("Invalid temp_max value; keeping default")
+            if 'rh_min' in data and data['rh_min'] is not None:
+                try:
+                    targets.rh_min_x10 = int(float(data['rh_min']) * 10)
+                except Exception:
+                    logger.warning("Invalid rh_min value; keeping default")
+            if 'co2_max' in data and data['co2_max'] is not None:
+                try:
+                    targets.co2_max = int(float(data['co2_max']))
+                except Exception:
+                    logger.warning("Invalid co2_max value; keeping default")
+
+            # Update from light schedule data with robust type handling
             if 'light' in data:
-                light_config = data['light']
-                mode = light_config.get('mode', 'off').lower()
-                if mode == 'off':
-                    targets.light_mode = 0
-                elif mode == 'on':
-                    targets.light_mode = 1
-                elif mode == 'cycle':
-                    targets.light_mode = 2
-                    targets.on_minutes = light_config.get('on_min', 0)
-                    targets.off_minutes = light_config.get('off_min', 0)
-                    
+                light_val = data['light']
+                if isinstance(light_val, dict):
+                    mode = str(light_val.get('mode', 'off')).lower()
+                    if mode == 'off':
+                        targets.light_mode = 0
+                    elif mode == 'on':
+                        targets.light_mode = 1
+                    elif mode == 'cycle':
+                        targets.light_mode = 2
+                        targets.on_minutes = int(light_val.get('on_min', 0) or 0)
+                        targets.off_minutes = int(light_val.get('off_min', 0) or 0)
+                elif isinstance(light_val, bool):
+                    targets.light_mode = 1 if light_val else 0
+                elif isinstance(light_val, str):
+                    mode = light_val.lower()
+                    if mode == 'off':
+                        targets.light_mode = 0
+                    elif mode == 'on':
+                        targets.light_mode = 1
+                    elif mode == 'cycle':
+                        targets.light_mode = 2
+                        targets.on_minutes = 0
+                        targets.off_minutes = 0
+                else:
+                    # Unsupported numeric/object types default to no change (OFF)
+                    logger.debug(f"Unsupported light value type: {type(light_val).__name__}; keeping defaults")
+
         except Exception as e:
             logger.error(f"Error converting control targets from dict: {e}")
             

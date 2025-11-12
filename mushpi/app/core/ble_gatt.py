@@ -310,8 +310,13 @@ def start_ble_service() -> bool:
     global _ble_service
     
     try:
+        # Always initialize if service exists but hasn't been initialized yet
         if _ble_service is None:
             if not initialize_ble_service():
+                return False
+        elif not _ble_service._running and _ble_service.service_manager.adapter is None:
+            # Service instance exists but wasn't initialized (e.g., created by set_callbacks)
+            if not _ble_service.initialize():
                 return False
                 
         return _ble_service.start()

@@ -26,12 +26,13 @@ class ControlTargetsCharacteristic(ReadWriteCharacteristic):
             service: BLE service object
             simulation_mode: Whether running in simulation mode
         """
-        super().__init__(CONTROL_TARGETS_UUID, service, simulation_mode)
-        
-        # Data and callbacks
+        # Data and callbacks must be set BEFORE calling super().__init__()
+        # because base class will call _handle_read() during initialization
         self.control_targets = ControlTargets.create_default()
         self.get_control_data: Optional[Callable] = None
         self.set_control_targets: Optional[Callable] = None
+        
+        super().__init__(CONTROL_TARGETS_UUID, service, simulation_mode)
         
     def _handle_read(self, options) -> bytes:
         """Read callback for control targets

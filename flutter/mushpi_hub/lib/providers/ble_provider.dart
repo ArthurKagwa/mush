@@ -3,7 +3,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:drift/drift.dart';
 import 'package:mushpi_hub/data/repositories/ble_repository.dart';
+import 'package:mushpi_hub/data/database/app_database.dart';
 import 'package:mushpi_hub/core/utils/ble_serializer.dart';
 import 'package:mushpi_hub/providers/database_provider.dart';
 import 'dart:developer' as developer;
@@ -349,7 +351,7 @@ class BLEOperations {
 
       if (exists) {
         // Update last connected timestamp
-        await devicesDao.updateLastConnected(deviceId);
+  await devicesDao.updateLastConnected(deviceId, DateTime.now());
         debugPrint('✅ [BLEOperations] Updated lastConnected timestamp');
         
         // Link to farm if farmId provided
@@ -360,10 +362,13 @@ class BLEOperations {
       } else {
         // Insert new device record
         await devicesDao.insertDevice(
-          deviceId: deviceId,
-          name: device.platformName,
-          address: device.remoteId.toString(),
-          farmId: farmId,
+          DevicesCompanion.insert(
+            deviceId: deviceId,
+            name: device.platformName,
+            address: device.remoteId.toString(),
+            lastConnected: DateTime.now(),
+            farmId: Value(farmId),
+          ),
         );
         debugPrint('✅ [BLEOperations] Inserted new device record');
       }

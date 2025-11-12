@@ -26,12 +26,13 @@ class StageStateCharacteristic(ReadWriteCharacteristic):
             service: BLE service object
             simulation_mode: Whether running in simulation mode
         """
-        super().__init__(STAGE_STATE_UUID, service, simulation_mode)
-        
-        # Data and callbacks
+        # Data and callbacks must be set BEFORE calling super().__init__()
+        # because base class will call _handle_read() during initialization
         self.stage_data = StageStateData.create_empty()
         self.get_stage_data: Optional[Callable] = None
         self.set_stage_state: Optional[Callable] = None
+        
+        super().__init__(STAGE_STATE_UUID, service, simulation_mode)
         
     def _handle_read(self, options) -> bytes:
         """Read callback for stage state
