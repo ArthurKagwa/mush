@@ -351,7 +351,7 @@ class BLEOperations {
 
       if (exists) {
         // Update last connected timestamp
-        await devicesDao.updateLastConnected(deviceId);
+  await devicesDao.updateLastConnected(deviceId, DateTime.now());
         debugPrint('✅ [BLEOperations] Updated lastConnected timestamp');
         
         // Link to farm if farmId provided

@@ -45,7 +45,14 @@ class BaseCharacteristic(ABC):
         self.properties = properties  # e.g. ['read', 'notify']
         self.service = service
         self.simulation_mode = simulation_mode
-        self.characteristic: Optional[Any] = None
+        self.characteristic = None  # BlueZero characteristic object once available
+        self._char_object_cached = None  # Cached object for direct value updates
+        self._notify_enabled = False  # Track subscription state
+        self._notify_enable_count = 0  # How many times enabled in this runtime
+        self._notify_push_count = 0  # Successful push count for diagnostics
+        # Store service/characteristic indices so we can update values later
+        self._srv_id = None
+        self._chr_id = None
 
         if not self.simulation_mode and BLE_AVAILABLE and self.service:
             if not hasattr(self.service, "peripheral") or not hasattr(self.service, "srv_id"):
@@ -55,7 +62,36 @@ class BaseCharacteristic(ABC):
     def _handle_notify_callback(self, notifying: bool, characteristic: Any):
         """Called when client enables/disables CCCD"""
         self.characteristic = characteristic
+        # Cache underlying characteristic object if present for direct updates
+        if characteristic is not None:
+            self._char_object_cached = characteristic
+        # Track subscription state
+        self._notify_enabled = bool(notifying)
+        if notifying:
+            self._notify_enable_count += 1
+        else:
+            # When notifications are disabled clear cached object to avoid stale refs
+            self._char_object_cached = None
         logger.info(f"BLE {'ENABLED' if notifying else 'DISABLED'}: {self.uuid}")
+        # When notifications are enabled, proactively push the current value
+        # so clients receive a fresh packet immediately after subscription.
+        if notifying:
+            try:
+                # Attempt to read current value via handler if available
+                if 'read' in self.properties:
+                    current = self._handle_read({})
+                    if isinstance(current, (bytes, bytearray)) and len(current) > 0:
+                        self.update_value(current)
+                        logger.info(f"Pushed current value on notify enable for {self.uuid} ({len(current)} bytes)")
+                    elif isinstance(current, list) and len(current) > 0:
+                        self.update_value(bytes(current))
+                        logger.info(f"Pushed current list value on notify enable for {self.uuid} ({len(current)} bytes)")
+                    else:
+                        logger.info(f"No current value to push on notify enable for {self.uuid}")
+                else:
+                    logger.info(f"Notify enabled for {self.uuid} but characteristic is not readable; skipping initial push")
+            except Exception as e:
+                logger.warning(f"Initial push on notify enable failed for {self.uuid}: {e}")
 
     def _create_characteristic(self):
         """Create characteristic using peripheral.add_characteristic() API"""
@@ -97,6 +133,9 @@ class BaseCharacteristic(ABC):
             )
 
             logger.info(f"  ✓ Created characteristic: {self.uuid} (srv={srv_id}, chr={chr_id})")
+            # Persist identifiers for future value updates
+            self._srv_id = srv_id
+            self._chr_id = chr_id
 
         except Exception as e:
             logger.error(f"Failed to create characteristic {self.uuid}: {e}")
@@ -151,12 +190,237 @@ class BaseCharacteristic(ABC):
         if self.simulation_mode:
             logger.debug(f"Skip notify (simulation mode): {self.uuid}")
             return
+        try:
+            self.update_value(data)
+            logger.debug(f"Notify/update requested for {self.uuid} ({len(data)} bytes)")
+        except Exception as e:
+            logger.warning(f"Notify/update failed for {self.uuid}: {e}")
+
+    # ---------------------------------------------------------------------
+    # Value update helpers
+    # ---------------------------------------------------------------------
+    def update_value(self, data: bytes):
+        """Update the characteristic value (triggering notify if subscribed).
+
+        We attempt multiple BlueZero peripheral APIs to remain compatible
+        with different library versions. Silent no-op if identifiers unknown.
+        """
+        if self.simulation_mode or not BLE_AVAILABLE:
+            return
+        if self._srv_id is None or self._chr_id is None:
+            # Characteristic created in simulation or identifiers not captured
+            logger.debug(f"Cannot update value (ids missing) for {self.uuid}")
+            return
+        periph = getattr(self.service, 'peripheral', None)
+        if periph is None:
+            logger.debug(f"Peripheral missing when updating {self.uuid}")
+            return
+        value_list = list(data)
+        # If this is a notify-capable characteristic and no client has enabled notifications yet,
+        # skip noisy update attempts; reads will still use the read handler.
+        if 'notify' in self.properties and not self._notify_enabled:
+            logger.debug(f"No subscribers for {self.uuid}; skipping notify update")
+            return
+        # Preferred fast path: if we have a cached characteristic object, try direct APIs
+        if self._char_object_cached is not None:
+            obj = self._char_object_cached
+            try:
+                # Try common direct methods
+                if hasattr(obj, 'set_value'):
+                    obj.set_value(value_list)
+                    self._notify_push_count += 1
+                    logger.info(f"Direct set_value succeeded for {self.uuid}")
+                    return
+                if hasattr(obj, 'notify'):
+                    obj.notify(value_list)
+                    self._notify_push_count += 1
+                    logger.info(f"Direct notify(value) succeeded for {self.uuid}")
+                    return
+                # Attribute assignment fallback
+                if hasattr(obj, 'value'):
+                    setattr(obj, 'value', value_list)
+                    self._notify_push_count += 1
+                    logger.info(f"Direct setattr(value) succeeded for {self.uuid}")
+                    return
+            except Exception as e:
+                logger.debug(f"Direct cached char update failed for {self.uuid}: {e}")
+            # Continue to legacy peripheral method probing if direct failed
+        attempted = False
+        succeeded = False
+        # Debug aid: ensure we're not accidentally pushing empty payloads
+        if not isinstance(data, (bytes, bytearray)) or len(data) == 0:
+            logger.debug(f"update_value called with empty/invalid data for {self.uuid}")
         
-        # Note: With peripheral.add_characteristic(), notifications are sent
-        # automatically when characteristic values change. This method is
-        # here for compatibility but may need adjustment based on your
-        # BlueZero version's notification mechanism.
-        logger.debug(f"Notify requested for {self.uuid} (handled by BlueZero)")
+        # Known method names across BlueZero versions
+        for method_name in (
+            'update_characteristic_value',  # hypothetical newer API
+            'update_char_value',            # observed in some forks
+            'update_characteristic',        # legacy naming
+            'notify',                       # some bluezero versions
+            'send_notify',                  # alternative naming
+        ):
+            if hasattr(periph, method_name):
+                attempted = True
+                try:
+                    # Try keyword signature first
+                    getattr(periph, method_name)(
+                        srv_id=self._srv_id,
+                        chr_id=self._chr_id,
+                        value=value_list
+                    )
+                    logger.info(f"{method_name}(kw) succeeded for {self.uuid}")
+                    succeeded = True
+                    return
+                except TypeError:
+                    # Some variants may accept positional args only
+                    try:
+                        getattr(periph, method_name)(self._srv_id, self._chr_id, value_list)
+                        logger.info(f"{method_name}(positional) succeeded for {self.uuid}")
+                        succeeded = True
+                        return
+                    except Exception as inner:
+                        logger.debug(f"{method_name} positional call failed for {self.uuid}: {inner}")
+                except Exception as inner:
+                    logger.debug(f"{method_name} failed for {self.uuid}: {inner}")
+        if not succeeded:
+            # Fallback: attempt generic characteristic store (best-effort)
+            try:
+                # Some implementations maintain internal dict: characteristics[(srv_id, chr_id)]['value']
+                chars = getattr(periph, 'characteristics', None)
+                if isinstance(chars, dict):
+                    key = (self._srv_id, self._chr_id)
+                    if key in chars:
+                        try:
+                            # Attempt common object-level methods or attributes
+                            char_obj = chars[key]
+                            # dict-like storage
+                            if isinstance(char_obj, dict):
+                                char_obj['value'] = value_list  # type: ignore[index]
+                                logger.info(f"Fallback dict value set for {self.uuid}")
+                                return
+                            # object-like API
+                            if hasattr(char_obj, 'notify'):
+                                try:
+                                    char_obj.notify(value_list)
+                                    logger.info(f"Fallback char.notify succeeded for {self.uuid}")
+                                    return
+                                except Exception:
+                                    pass
+                            if hasattr(char_obj, 'set_value'):
+                                try:
+                                    char_obj.set_value(value_list)
+                                    logger.info(f"Fallback char.set_value succeeded for {self.uuid}")
+                                    return
+                                except Exception:
+                                    pass
+                            if hasattr(char_obj, 'value'):
+                                try:
+                                    setattr(char_obj, 'value', value_list)
+                                    logger.info(f"Fallback setattr(value) succeeded for {self.uuid}")
+                                    return
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                
+                # Deeper reflection: traverse services -> characteristics to find the object
+                def _try_apply_to_char(obj) -> bool:
+                    try:
+                        if hasattr(obj, 'set_value'):
+                            obj.set_value(value_list)
+                            logger.info(f"Reflection set_value succeeded for {self.uuid}")
+                            return True
+                        if hasattr(obj, 'notify'):
+                            obj.notify(value_list)
+                            logger.info(f"Reflection notify succeeded for {self.uuid}")
+                            return True
+                        if hasattr(obj, 'value'):
+                            setattr(obj, 'value', value_list)
+                            logger.info(f"Reflection setattr(value) succeeded for {self.uuid}")
+                            return True
+                    except Exception as _:
+                        return False
+                    return False
+
+                # 1) Look for services container
+                services = (
+                    getattr(periph, 'services', None)
+                    or getattr(periph, '_services', None)
+                    or getattr(periph, 'gatt_services', None)
+                )
+                service_obj = None
+                if isinstance(services, dict):
+                    service_obj = services.get(self._srv_id) or services.get(str(self._srv_id))
+                elif isinstance(services, (list, tuple)):
+                    # srv_id is 1-based; adjust if list
+                    idx = max(0, int(self._srv_id) - 1) if self._srv_id else 0
+                    if 0 <= idx < len(services):
+                        service_obj = services[idx]
+
+                # 2) From service, get characteristics
+                char_obj = None
+                if service_obj is not None:
+                    candidates = (
+                        getattr(service_obj, 'characteristics', None)
+                        or getattr(service_obj, 'chars', None)
+                        or getattr(service_obj, '_characteristics', None)
+                    )
+                    if isinstance(candidates, dict):
+                        # Try by various keys
+                        char_obj = candidates.get(self._chr_id) or candidates.get(str(self._chr_id))
+                        if not char_obj:
+                            # Some dicts keyed by uuid
+                            for k, v in candidates.items():
+                                try:
+                                    if str(getattr(v, 'uuid', '')).lower() == str(self.uuid).lower():
+                                        char_obj = v
+                                        break
+                                except Exception:
+                                    continue
+                    elif isinstance(candidates, (list, tuple)):
+                        idx = max(0, int(self._chr_id) - 1) if self._chr_id else 0
+                        if 0 <= idx < len(candidates):
+                            char_obj = candidates[idx]
+
+                    if char_obj and _try_apply_to_char(char_obj):
+                        return
+
+                # 3) Broad search: scan periph attributes for containers holding a matching uuid
+                try:
+                    for attr_name in dir(periph):
+                        if attr_name.startswith('_'):
+                            continue
+                        try:
+                            val = getattr(periph, attr_name)
+                        except Exception:
+                            continue
+                        # Only inspect containers
+                        if isinstance(val, dict):
+                            for _, v in val.items():
+                                try:
+                                    if str(getattr(v, 'uuid', '')).lower() == str(self.uuid).lower():
+                                        if _try_apply_to_char(v):
+                                            logger.info(f"Reflection via periph.{attr_name} container succeeded for {self.uuid}")
+                                            return
+                                except Exception:
+                                    continue
+                        elif isinstance(val, (list, tuple)):
+                            for v in val:
+                                try:
+                                    if str(getattr(v, 'uuid', '')).lower() == str(self.uuid).lower():
+                                        if _try_apply_to_char(v):
+                                            logger.info(f"Reflection via periph.{attr_name} list succeeded for {self.uuid}")
+                                            return
+                                except Exception:
+                                    continue
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        if attempted and not succeeded:
+            logger.warning(f"No compatible BlueZero update method succeeded for {self.uuid} (attempted direct methods)")
+        elif not attempted:
+            logger.debug(f"No BlueZero update methods found for {self.uuid}; fallbacks also failed")
 
 # Subclasses unchanged
 class ReadOnlyCharacteristic(BaseCharacteristic):

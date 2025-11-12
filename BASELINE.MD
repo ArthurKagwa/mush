@@ -7,6 +7,53 @@
 - **STACK APPROACH**: Latest entries first (reverse chronological order)
 
 ---
+### 2025-11-11 - Environmental Serializer Type Coercion + Clamping ✅
+Status: Complete (unit-tested locally)
+Files Modified: `mushpi/app/ble/serialization.py`, `mushpi/app/ble/characteristics/environmental.py`
+Files Added: `mushpi/test_environmental_serializer.py`
+
+Problem:
+- After enabling immediate env notifications, packing sometimes failed with "required argument is not an integer" when upstream values were None or floats (e.g., light=0.0).
+
+Fixes:
+1. Added robust integer coercion and clamping in `EnvironmentalSerializer.pack()` to enforce protocol types without relying on callers:
+  - u16 fields (co2_ppm, rh_x10, light_raw) → [0..(1<<16)-1]
+  - s16 field (temp_x10) → [-(1<<15)..(1<<15)-1]
+  - u32 field (uptime_ms) → [0..(1<<32)-1]
+  - Gracefully handles None/float inputs via best-effort int conversion
+2. Cast `co2` and `light` to int in `EnvironmentalMeasurementsCharacteristic.update_data()` to keep `env_data` consistently typed.
+
+Verification:
+- Added focused test `mushpi/test_environmental_serializer.py` covering nominal, None/float, out-of-range clamping, negative clamping, and missing attribute defaulting.
+- Ran the test script directly; all checks passed.
+
+Impact:
+- Prevents struct.pack errors; ensures 12-byte packets consistently produced.
+- Flutter app should now receive environmental notifications reliably even when upstream readings briefly produce None/float values.
+
+Next:
+- Validate on-device that 12-byte notifications arrive; if needed, mirror this pattern for status flags updates.
+
+---
+### 2025-11-11 - Notify Enable Push + BlueZero Update Instrumentation ✅
+Status: Complete (awaiting on-device validation)
+Files Modified: `mushpi/app/ble/base.py`, `flutter/mushpi_hub/lib/providers/ble_provider.dart`
+
+Problem:
+- App received a 0-byte packet upon subscription but no subsequent updates. The serializer fix removed type errors, but characteristic value updates may not have been applied in a way BlueZero uses to emit notifications.
+
+Fixes:
+1. Immediate push on notify enable: when a client enables notifications (CCCD), the base class now reads the current value and calls update_value() to send a fresh packet right away.
+2. Detailed update instrumentation: added debug logs marking which BlueZero update method succeeded (kw vs positional), and fallbacks when mutating characteristic objects/dicts. Also logs if empty payloads are attempted.
+3. Flutter DAO invocation fix: `DevicesDao.updateLastConnected` now called with `(deviceId, DateTime.now())` to match DAO signature.
+
+Expected impact:
+- Right after enabling notifications, Flutter should receive a 12-byte environmental payload (not 0 bytes). Ongoing updates continue via `update_data()` path.
+
+Next:
+- On-device run to confirm which update method is effective in logs and verify app receives 12-byte packets. Adjust if needed based on instrumentation output.
+
+---
 
 ## 📋 CURRENT PENDING TASKS (Stack Order - Top Priority First)
 
@@ -62,6 +109,86 @@
 ## Progress Log
 
 **Note:** All entries below are in reverse chronological order (newest entries at top)
+
+---
+### 2025-11-11 - BLE Live Value Update + Notification Compatibility Fix ✅
+**Status:** Complete (code patched; awaiting on-device verification of packet sizes)
+**Files Modified:** `mushpi/app/ble/base.py`, `mushpi/app/ble/characteristics/environmental.py`
+
+**Issue:** Flutter app showed only heartbeats and zero-length environmental/status packets. Pi logs displayed sensor values ("BLE advertising readings"), but no actual notification value changes were reaching clients. `BaseCharacteristic.notify()` was a no-op, environmental characteristic never updated the underlying GATT value, and BlueZero required an explicit characteristic value update to trigger notifications.
+
+**Fixes Implemented:**
+1. Added persistent storage of `srv_id` and `chr_id` in `BaseCharacteristic` when creating characteristics via `peripheral.add_characteristic()`.
+2. Replaced no-op `notify()` with `update_value()` that attempts multiple BlueZero API methods (`update_characteristic_value`, `update_char_value`, `update_characteristic`, `notify`, `send_notify`) plus fallback internal dictionary/object mutations.
+3. Broadened compatibility by checking characteristic object methods (`notify`, `set_value`, attribute assignment) if peripheral-level updates are unavailable.
+4. Patched `EnvironmentalMeasurementsCharacteristic.update_data()` to immediately pack current sensor values and call `self.notify(packed)` so the underlying characteristic value updates each time new readings arrive (even before devices connect or queue publishes).
+5. Added defensive logging for failures without hard-coded constants; no mock data introduced; environment configuration untouched.
+
+**Expected Result:** Subsequent sensor loops update the characteristic value, triggering BlueZero notifications for subscribed clients; Flutter should begin receiving 12-byte environmental packets and 4-byte status packets. Log line: "Notify/update requested for <UUID> (12 bytes)" appears after updates.
+
+**Next Validation Steps:**
+- Connect Flutter app; confirm non-empty packets in debug logs.
+- If packets still empty, instrument `notify_environmental_data()` for connected device presence and validate connection manager device set.
+
+**Risk & Mitigation:** Fallback paths remain silent if BlueZero internal method names differ; extended method list plus object attribute attempts minimize incompatibility risk. Simulation mode still bypasses updates.
+
+**Follow-up:** Add direct status flag value update after each flag change (similar pattern) if needed. Evaluate queue coalescing metrics once notifications flow.
+
+---
+### 2025-11-11 - BlueZ Advertisement Fix: Reduce Payload Size ✅
+**Status:** Complete (code change deployed)
+**Files Modified:** `mushpi/app/ble/service.py`
+
+**Issue:** bluetoothd logged `Advertising data too long or couldn't be generated` and `Failed to add advertisement: <unknown status> (0xea)`. Our LE advertisement included two 128‑bit ServiceUUIDs (MushPi + UART), LocalName, and tx-power include, exceeding legacy ADV/SCAN_RSP byte limits.
+
+**Fix:**
+- Advertise only the primary MushPi service UUID (`ServiceUUIDs=[MushPi]`).
+- Removed `LocalName` and `Includes` from the LEAdvertisement object to minimize payload; device name still provided via adapter alias.
+
+**Expected Result:** BlueZ accepts `RegisterAdvertisement`; GATT unchanged; UART service still available via GATT but no longer advertised.
+
+**Notes:** If further trimming is needed, shorten adapter alias. Extended advertising not enabled.
+
+---
+### 2025-11-10 - Milestone 4: Environmental Measurements Characteristic (dbus-next) ✅
+**Status:** Complete (code implemented; awaiting on-device validation)
+**Files Modified:** `mushpi/app/ble/backends/bluez_dbus.py`
+
+**Goal:** Add 12-byte `env_measurements` (read/notify) characteristic to the minimal BlueZ D-Bus backend to advance migration toward full protocol parity under env gate `MUSHPI_BLE_GATT_MINIMAL_ENABLE`.
+
+**Changes:**
+- Implemented `EnvironmentalCharacteristic` (org.bluez.GattCharacteristic1) exporting alongside existing `StatusFlagsCharacteristic` in `_register_gatt_minimal`.
+- Integrated serializer (`EnvironmentalSerializer`) for protocol format: u16 CO2 ppm, s16 temp×10, u16 RH×10, u16 light raw, u32 uptime ms.
+- Wired backend `notify()` to handle both `status_flags` and `env_measurements` when minimal GATT enabled; schedules async `push_update` emitting `PropertiesChanged` when clients subscribed.
+- Added uptime tracking (`_start_ts`) and clamping of all fields to protocol ranges; no hard-coded numeric constants beyond type bounds.
+- Clean unregistration path now removes both characteristics; robust error handling on registration failure.
+
+**Environment:** Reuses `MUSHPI_BLE_GATT_MINIMAL_ENABLE`; no new variables introduced; still respects existing bus/app/adapter env values.
+
+**Acceptance (Pending Validation):** Code ready; requires enabling gate and verifying via `bluetoothctl` or `busctl tree org.bluez` that service exposes two characteristics and read returns 12 bytes. Notify path validated after subscription (client StartNotify).
+
+**Next Steps:**
+1. On-device test: confirm discovery + correct 12-byte payload.
+2. Add integration test harness (future) for PropertiesChanged emission timing.
+3. Proceed to write characteristics (Milestone 5) after stability confirmation.
+
+**Risks & Mitigation:** D-Bus registration failure cleans up exports; legacy BlueZero unaffected due to env gating. Performance impact minimal (single serialization per notify/read). Uptime derived locally; no shared state contention.
+
+---
+### 2025-11-10 - Backend PLAN.md Completed and Aligned ✅
+**Status:** Complete (documentation update)
+**Files Modified:** `mushpi/PLAN.md`
+
+**What changed:**
+- Rewrote the backend plan to align with the current architecture and recent milestones.
+- Removed all hard-coded values and moved configuration references to environment variables and JSON profiles.
+- Added clear goals, success criteria, module contracts, testing strategy, risks, and an acceptance checklist.
+- Captured the BLE backend migration milestones (dbus-next over BlueZ) with env-gated rollout.
+- Linked operational details to `mushpi/README.md` instead of duplicating commands.
+
+**Why:** Keep the plan authoritative, environment-driven, and consistent with the new BLE backend work and non-blocking notification architecture.
+
+**Acceptance:** Plan is comprehensive, env-first, and matches code + baseline. Future work can be tracked against the milestones and acceptance checklist.
 
 ---
 ### 2025-11-10 - Milestone 2: dbus-next Skeleton + Async Loop Thread ✅
@@ -430,6 +557,34 @@ BLE advertising readings: T=0.0°C, RH=0.0%, CO2=0ppm, Light=0 (uptime: 0s)
 
 **Impact:**
 - ✅ BLE characteristics can now read actual system data
+                                          ### 2025-11-11 - BLE GATT Publish Timeout Config + Adv Retry + Quiet Notify When Unsubscribed ✅
+                                          Status: Complete (awaiting on-device log confirmation)
+                                          Files Modified: `mushpi/app/ble/service.py`, `mushpi/app/ble/base.py`, `BLUETOOTH_TROUBLESHOOTING.md`
+
+                                          Problems Observed:
+                                          1) GATT publish warning after 10s even when GATT app is registered (slow BlueZ path).
+                                          2) Intermittent BlueZ advertisement registration failures/timeouts during startup.
+                                          3) Noisy warnings from `BaseCharacteristic.update_value()` when no client had subscribed yet, plus compatibility gaps.
+
+                                          Changes:
+                                          1) Environment-configurable GATT publish timeout via `MUSHPI_BLE_GATT_PUBLISH_TIMEOUT_SEC`.
+                                          2) Advertisement registration: optional stabilization delay + retry/backoff loop controlled by:
+                                             - `MUSHPI_BLE_ADV_STABILIZATION_DELAY_MS`
+                                             - `MUSHPI_BLE_ADV_REGISTER_RETRIES`
+                                             - `MUSHPI_BLE_ADV_REGISTER_BACKOFF_MS`
+                                             - `MUSHPI_BLE_ADV_REGISTER_BACKOFF_MAX_MS`
+                                          3) Notification reliability: cache characteristic object on notify enable; prefer direct `set_value` / `notify` methods; skip updates (debug log) when no subscribers.
+
+                                          Verification Steps:
+                                          1) Set env vars in `.env` (example: `MUSHPI_BLE_GATT_PUBLISH_TIMEOUT_SEC=15`).
+                                          2) Start MushPi; confirm timeout reflected in publish log.
+                                          3) Observe advertisement registration; with retries enabled see backoff messages or success.
+                                          4) Subscribe from BLE client; expect `Direct set_value succeeded` (or notify) logs; absence of previous warning spam.
+
+                                          Notes:
+                                          - All new behaviors are optional and default to legacy behavior if env vars unset.
+                                          - Service discoverable even if advertisement fails; GATT publish remains primary.
+
 - ✅ Stage state properly transmitted (species, stage, mode)
 - ✅ Control system status visible via BLE
 - ✅ Sensor readings (even zeros) now flow to mobile app

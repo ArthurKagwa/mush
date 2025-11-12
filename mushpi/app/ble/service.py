@@ -228,8 +228,9 @@ class BLEGATTServiceManager:
             
             # CRITICAL: Publish the GATT server to BlueZ so services become discoverable
             # NOTE: This call can block for several minutes if BlueZ's advertisement registration hangs
-            # We run it in a background thread with a timeout to avoid blocking startup
-            logger.info("Publishing GATT server to BlueZ (timeout: 10s)...")
+            # We run it in a background thread with a configurable timeout to avoid blocking startup
+            gatt_publish_timeout_sec = max(1, int(self._ble_cfg.get('gatt_publish_timeout_sec', 10)))
+            logger.info(f"Publishing GATT server to BlueZ (timeout: {gatt_publish_timeout_sec}s)...")
             
             publish_success = False
             publish_thread = None
@@ -246,11 +247,11 @@ class BLEGATTServiceManager:
                 # Run publish in background thread with timeout
                 publish_thread = threading.Thread(target=publish_in_thread, daemon=True)
                 publish_thread.start()
-                publish_thread.join(timeout=10)  # Wait max 10 seconds
+                publish_thread.join(timeout=gatt_publish_timeout_sec)  # Wait up to configured seconds
                 
                 if publish_thread.is_alive():
                     # Thread still running after timeout - publish is hanging
-                    logger.warning("⚠️  GATT server publish timed out after 10s")
+                    logger.warning(f"⚠️  GATT server publish timed out after {gatt_publish_timeout_sec}s")
                     logger.info("ℹ️  This is likely due to BlueZ advertisement registration blocking")
                     logger.info("ℹ️  Services may still be discoverable via adapter configuration")
                     # Thread will continue in background but we don't wait for it
@@ -394,8 +395,31 @@ class BLEGATTServiceManager:
             # If this fails, the service will still be discoverable via standard GATT service discovery
             if DBUS_AVAILABLE:
                 try:
-                    # Use a shorter timeout (5s instead of 60s) to avoid blocking startup
-                    self._register_dbus_advertisement(advertising_name)
+                    # Optional stabilization delay after powering adapter/discoverable
+                    stab_delay_ms = int(self._ble_cfg.get('adv_stabilization_delay_ms', 0))
+                    if stab_delay_ms > 0:
+                        logger.debug(f"Waiting {stab_delay_ms}ms for adapter stabilization before advertisement registration")
+                        time.sleep(stab_delay_ms / 1000.0)
+
+                    # Retry registration with backoff as configured
+                    retries = max(0, int(self._ble_cfg.get('adv_register_retries', 0)))
+                    backoff_base = max(0, int(self._ble_cfg.get('adv_backoff_base_ms', 0)))
+                    backoff_max = max(backoff_base, int(self._ble_cfg.get('adv_backoff_max_ms', backoff_base)))
+
+                    attempt = 0
+                    while True:
+                        success = self._register_dbus_advertisement(advertising_name)
+                        if success:
+                            break
+                        if attempt >= retries:
+                            logger.info("ℹ️  D-Bus advertisement not registered after retries (service still discoverable)")
+                            break
+                        # backoff with simple exponential growth capped at max
+                        delay_ms = min(backoff_max, backoff_base * (2 ** attempt) if backoff_base > 0 else 0)
+                        attempt += 1
+                        if delay_ms > 0:
+                            logger.debug(f"Retrying advertisement registration in {delay_ms}ms (attempt {attempt}/{retries})")
+                            time.sleep(delay_ms / 1000.0)
                 except dbus.exceptions.DBusException as e:
                     # Advertisement registration can fail if already registered or BlueZ busy
                     # This is OK - GATT server is published, service discovery will work fine
@@ -765,15 +789,16 @@ class BLEGATTServiceManager:
                     self.config = None
 
                 def get_properties(self):
+                    # Keep advertisement payload minimal to avoid BlueZ size errors (0xea):
+                    # - Advertise ONLY the primary 128-bit service UUID
+                    # - Rely on adapter alias for device name (omit LocalName here)
+                    # - Do not include optional fields like tx-power
                     return {
                         'org.bluez.LEAdvertisement1': {
                             'Type': dbus.String(self.ad_type),
                             'ServiceUUIDs': dbus.Array([
-                                dbus.String(str(self.config.bluetooth.service_uuid)),
-                                dbus.String(str(UART_SERVICE_UUID))
-                            ], signature='s'),
-                            'LocalName': dbus.String(advertising_name),
-                            'Includes': dbus.Array([dbus.String('tx-power')], signature='s')
+                                dbus.String(str(self.config.bluetooth.service_uuid))
+                            ], signature='s')
                         }
                     }
 
@@ -841,6 +866,7 @@ class BLEGATTServiceManager:
             logger.info(f"  Path: {ad_path}")
             logger.info(f"  Name: '{advertising_name}'")
             logger.info(f"  UUID: {self.config.bluetooth.service_uuid}")
+            return True
             
         except dbus.exceptions.DBusException as e:
             # Log specific D-Bus errors with helpful messages
@@ -863,9 +889,10 @@ class BLEGATTServiceManager:
             else:
                 logger.debug(f"D-Bus advertisement error: {e}")
                 logger.info("ℹ️  Advertisement not registered (service is still discoverable)")
+            return False
         except Exception as e:
             logger.error(f"Unexpected error registering advertisement: {e}")
-            raise
+            return False
 
     def _unregister_dbus_advertisement(self):
         """Unregister D-Bus advertisement with proper error handling"""
@@ -937,7 +964,13 @@ class BLEGATTServiceManager:
             'publish_backoff_max_ms': _get_int('MUSHPI_BLE_PUBLISH_BACKOFF_MAX_MS', 1000),
             'log_slow_publish_ms': _get_int('MUSHPI_BLE_LOG_SLOW_PUBLISH_MS', 250),
             'shutdown_timeout_ms': _get_int('MUSHPI_BLE_SHUTDOWN_TIMEOUT_MS', 1500),
-            'worker_restart': _get_bool('MUSHPI_BLE_WORKER_RESTART', False)
+            'worker_restart': _get_bool('MUSHPI_BLE_WORKER_RESTART', False),
+            # New: GATT publish and advertisement controls
+            'gatt_publish_timeout_sec': _get_int('MUSHPI_BLE_GATT_PUBLISH_TIMEOUT_SEC', 10),
+            'adv_stabilization_delay_ms': _get_int('MUSHPI_BLE_ADV_STABILIZATION_DELAY_MS', 0),
+            'adv_register_retries': _get_int('MUSHPI_BLE_ADV_REGISTER_RETRIES', 0),
+            'adv_backoff_base_ms': _get_int('MUSHPI_BLE_ADV_REGISTER_BACKOFF_MS', 0),
+            'adv_backoff_max_ms': _get_int('MUSHPI_BLE_ADV_REGISTER_BACKOFF_MAX_MS', 0),
         }
 
     def _init_notification_worker(self):

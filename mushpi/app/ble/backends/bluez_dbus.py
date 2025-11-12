@@ -169,8 +169,10 @@ class BluezDbusBackend(BaseBLEBackend):
         self._gatt_minimal: bool = _get_env_bool('MUSHPI_BLE_GATT_MINIMAL_ENABLE', False)
         self._objects_exported: bool = False
         self._status_char: Optional["StatusFlagsCharacteristic"] = None
+        self._env_char: Optional["EnvironmentalCharacteristic"] = None
         self._initialized = False
         self._started = False
+        self._start_ts: float = time.time()
         self._bus_timeout_ms = _get_env_int('MUSHPI_DBUS_BUS_TIMEOUT_MS', 2500)
         self._shutdown_timeout_ms = _get_env_int('MUSHPI_BLE_SHUTDOWN_TIMEOUT_MS', 1500)
         self._adv_enable = _get_env_bool('MUSHPI_BLE_ADV_ENABLE', True)
@@ -208,27 +210,38 @@ class BluezDbusBackend(BaseBLEBackend):
 
         This uses BlueZ GattManager1.RegisterApplication and exports two objects:
           - Service object implementing org.bluez.GattService1
-          - Characteristic object implementing org.bluez.GattCharacteristic1
+          - Characteristic object implementing org.bluez.GattCharacteristic1 (Status Flags)
+          - Characteristic object implementing org.bluez.GattCharacteristic1 (Environmental Measurements)
         """
         if not _DBUS_AVAILABLE or not self._bus:
             return
         # Build objects
         service_uuid = "12345678-1234-5678-1234-56789abcdef0"  # protocol constant (public)
         service_path = f"{self._app_path}/service0"
-        char_uuid = "12345678-1234-5678-1234-56789abcdef5"  # Status Flags
-        char_path = f"{service_path}/char0"
+        status_uuid = "12345678-1234-5678-1234-56789abcdef5"  # Status Flags
+        status_path = f"{service_path}/char0"
+        env_uuid = "12345678-1234-5678-1234-56789abcdef1"  # Environmental Measurements
+        env_path = f"{service_path}/char1"
 
         service = GattServiceInterface(service_path, uuid=service_uuid, primary=True)
         self._status_char = StatusFlagsCharacteristic(
-            path=char_path,
-            uuid=char_uuid,
+            path=status_path,
+            uuid=status_uuid,
             service_path=service_path,
             get_flags_cb=self._callbacks.get('get_status_flags'),
+        )
+        self._env_char = EnvironmentalCharacteristic(
+            path=env_path,
+            uuid=env_uuid,
+            service_path=service_path,
+            get_env_cb=self._callbacks.get('get_sensor_data'),
+            start_ts=self._start_ts,
         )
 
         # Export
         self._bus.export(service_path, service)
-        self._bus.export(char_path, self._status_char)
+        self._bus.export(status_path, self._status_char)
+        self._bus.export(env_path, self._env_char)
 
         # Register with BlueZ
         adapter_path = f"/org/bluez/{self._adapter_name}"
@@ -238,7 +251,7 @@ class BluezDbusBackend(BaseBLEBackend):
         try:
             await gatt_manager.call_register_application(self._app_path, {})
             self._objects_exported = True
-            logger.info("Registered minimal GATT application at %s", self._app_path)
+            logger.info("Registered minimal GATT application at %s (env + status)", self._app_path)
         except Exception as e:
             logger.error("GattManager1.RegisterApplication failed: %s", e)
             # Unexport on failure
@@ -247,10 +260,15 @@ class BluezDbusBackend(BaseBLEBackend):
             except Exception:
                 pass
             try:
-                self._bus.unexport(char_path, self._status_char)  # type: ignore[arg-type]
+                self._bus.unexport(status_path, self._status_char)  # type: ignore[arg-type]
+            except Exception:
+                pass
+            try:
+                self._bus.unexport(env_path, self._env_char)  # type: ignore[arg-type]
             except Exception:
                 pass
             self._status_char = None
+            self._env_char = None
             self._objects_exported = False
 
     async def _unregister_gatt_minimal(self) -> None:
@@ -270,13 +288,18 @@ class BluezDbusBackend(BaseBLEBackend):
         finally:
             # Best-effort unexport of objects
             service_path = f"{self._app_path}/service0"
-            char_path = f"{service_path}/char0"
+            status_path = f"{service_path}/char0"
+            env_path = f"{service_path}/char1"
             try:
                 self._bus.unexport(service_path, None)  # type: ignore[arg-type]
             except Exception:
                 pass
             try:
-                self._bus.unexport(char_path, None)  # type: ignore[arg-type]
+                self._bus.unexport(status_path, None)  # type: ignore[arg-type]
+            except Exception:
+                pass
+            try:
+                self._bus.unexport(env_path, None)  # type: ignore[arg-type]
             except Exception:
                 pass
             self._objects_exported = False
@@ -289,6 +312,8 @@ class BluezDbusBackend(BaseBLEBackend):
         if self._started:
             logger.debug("BluezDbusBackend already started")
             return True
+        # Set start timestamp for uptime accounting
+        self._start_ts = time.time()
 
         # Schedule bus connection on loop
         fut = self._loop_owner.run_coro_threadsafe(self._connect_bus())
@@ -342,15 +367,19 @@ class BluezDbusBackend(BaseBLEBackend):
         logger.debug("BluezDbusBackend callbacks registered: %s", list(self._callbacks.keys()))
 
     def notify(self, characteristic_name: str, devices: Optional[Set[str]] = None) -> None:
-        # Minimal: only support status_flags when minimal GATT enabled
-        if characteristic_name != 'status_flags' or not self._gatt_minimal:
-            logger.debug("BluezDbusBackend.notify(%s) ignored (minimal GATT off or unsupported)", characteristic_name)
+        # Minimal path supports 'status_flags' and 'env_measurements' when enabled
+        if not self._gatt_minimal:
+            logger.debug("BluezDbusBackend.notify(%s) ignored (minimal GATT disabled)", characteristic_name)
             return
-        if not self._status_char:
+        if characteristic_name == 'status_flags' and self._status_char:
+            coro = self._status_char.push_update(self._callbacks.get('get_status_flags'))
+            self._loop_owner.run_coro_threadsafe(coro)
             return
-        # Schedule async update that emits PropertiesChanged if notifying
-        coro = self._status_char.push_update(self._callbacks.get('get_status_flags'))
-        self._loop_owner.run_coro_threadsafe(coro)
+        if characteristic_name == 'env_measurements' and self._env_char:
+            coro2 = self._env_char.push_update(self._callbacks.get('get_sensor_data'))
+            self._loop_owner.run_coro_threadsafe(coro2)
+            return
+        logger.debug("BluezDbusBackend.notify(%s) unsupported in minimal backend", characteristic_name)
 
     def update_advertising_name(self, name: Optional[str] = None) -> None:
         # Placeholder (advertisement arrives future milestone)
@@ -485,4 +514,118 @@ if _DBUS_AVAILABLE:
                 self.emit_properties_changed({'Value': Variant('ay', self._value)}, [])  # type: ignore[attr-defined]
             except Exception:
                 # Fallback: do nothing if emit not supported by backend; BlueZ may still poll via read
+                pass
+
+
+    class EnvironmentalCharacteristic(ServiceInterface):
+        """org.bluez.GattCharacteristic1 for Environmental Measurements (read/notify).
+
+        12-byte payload packed by EnvironmentalSerializer:
+          u16 CO2 ppm, s16 temp*10 C, u16 rh*10 %, u16 light raw, u32 uptime ms
+        """
+
+        def __init__(self, path: str, uuid: str, service_path: str,
+                     get_env_cb: Optional[Callable[[], Any]] = None,
+                     start_ts: float = 0.0):
+            super().__init__('org.bluez.GattCharacteristic1')
+            self._path = path
+            self._uuid = uuid
+            self._service = service_path
+            self._flags = ['read', 'notify']
+            self._value: List[int] = [0x00] * 12
+            self._notifying = False
+            self._get_env_cb = get_env_cb
+            self._start_ts = start_ts
+
+        # Properties
+        @dbus_property()
+        def UUID(self) -> 's':  # type: ignore[override]
+            return self._uuid
+
+        @dbus_property()
+        def Service(self) -> 'o':  # type: ignore[override]
+            return self._service
+
+        @dbus_property()
+        def Flags(self) -> 'as':  # type: ignore[override]
+            return self._flags
+
+        @dbus_property()
+        def Value(self) -> 'ay':  # type: ignore[override]
+            return self._value
+
+        # Methods
+        @dbus_method()
+        def ReadValue(self, options: 'a{sv}') -> 'ay':  # type: ignore[override]
+            self._value = self._compute_value_bytes()
+            return self._value
+
+        @dbus_method()
+        def StartNotify(self) -> None:  # type: ignore[override]
+            self._notifying = True
+
+        @dbus_method()
+        def StopNotify(self) -> None:  # type: ignore[override]
+            self._notifying = False
+
+        def _compute_value_bytes(self) -> List[int]:
+            # Lazy import to avoid heavy import timing
+            try:
+                from ...ble.serialization import EnvironmentalSerializer
+                from ...models.ble_dataclasses import EnvironmentalData as EnvData
+            except Exception:
+                EnvironmentalSerializer = None  # type: ignore
+                EnvData = None  # type: ignore
+
+            co2 = 0
+            temp_x10 = 0
+            rh_x10 = 0
+            light = 0
+            # Pull from callback if available
+            if callable(self._get_env_cb):
+                try:
+                    payload = self._get_env_cb()
+                    if isinstance(payload, dict):
+                        co2 = int(payload.get('co2') or 0)
+                        t = payload.get('temperature')
+                        temp_x10 = int(round(float(t) * 10)) if t is not None else 0
+                        h = payload.get('humidity')
+                        rh_x10 = int(round(float(h) * 10)) if h is not None else 0
+                        light = int(payload.get('light') or 0)
+                except Exception as e:
+                    logger.warning("get_sensor_data callback error: %s", e)
+
+            # Compute uptime from backend start timestamp
+            uptime_ms = int(max(0.0, (time.time() - self._start_ts)) * 1000)
+
+            # Clamp to protocol ranges
+            def _clamp(v, lo, hi):
+                return max(lo, min(hi, v))
+
+            co2 = _clamp(co2, 0, 0xFFFF)
+            temp_x10 = _clamp(temp_x10, -32768, 32767)
+            rh_x10 = _clamp(rh_x10, 0, 0xFFFF)
+            light = _clamp(light, 0, 0xFFFF)
+            uptime_ms = _clamp(uptime_ms, 0, 0xFFFFFFFF)
+
+            if EnvironmentalSerializer is not None and EnvData is not None:
+                try:
+                    data = EnvData(co2_ppm=co2, temp_x10=temp_x10, rh_x10=rh_x10,
+                                   light_raw=light, uptime_ms=uptime_ms)
+                    packed: bytes = EnvironmentalSerializer.pack(data)
+                    return list(packed)
+                except Exception as e:
+                    logger.warning("Failed to pack environmental data: %s", e)
+            # Fallback: 12 zero bytes
+            return [0x00] * 12
+
+        async def push_update(self, get_env_cb: Optional[Callable[[], Any]] = None) -> None:
+            if get_env_cb is not None:
+                self._get_env_cb = get_env_cb
+            if not self._notifying:
+                return
+            self._value = self._compute_value_bytes()
+            try:
+                self.emit_properties_changed({'Value': Variant('ay', self._value)}, [])  # type: ignore[attr-defined]
+            except Exception:
                 pass

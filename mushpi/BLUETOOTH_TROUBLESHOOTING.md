@@ -30,6 +30,13 @@ org.freedesktop.DBus.Error.NoReply: Did not receive a reply...
    - Adds `introspect=False` to reduce initial connection overhead
    - Better mainloop initialization
 
+5. **Configurable Timeouts and Retries (via .env)**
+   - `MUSHPI_BLE_GATT_PUBLISH_TIMEOUT_SEC` — max seconds to wait for GATT publish thread before continuing (default 10)
+   - `MUSHPI_BLE_ADV_STABILIZATION_DELAY_MS` — delay after powering/marking adapter discoverable before registering advertisement (default 0)
+   - `MUSHPI_BLE_ADV_REGISTER_RETRIES` — number of retries for `RegisterAdvertisement` on transient failures (default 0)
+   - `MUSHPI_BLE_ADV_REGISTER_BACKOFF_MS` — base backoff between retries (exponential, default 0)
+   - `MUSHPI_BLE_ADV_REGISTER_BACKOFF_MAX_MS` — cap for backoff delay (default 0)
+
 ## Quick Fixes
 
 ### 1. Restart Bluetooth Service
