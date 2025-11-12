@@ -188,5 +188,10 @@ class StatusFlags {
   static const int stageReady = 1 << 2; // Bit 2
   static const int thresholdAlarm = 1 << 3; // Bit 3
   static const int connectivity = 1 << 4; // Bit 4
+  // Actuator live state bits (Option A extension of status flags)
+  static const int lightOn = 1 << 5; // Bit 5 - Grow light relay ON
+  static const int fanOn = 1 << 6; // Bit 6 - Fan relay ON
+  static const int mistOn = 1 << 8; // Bit 8 - Humidifier/mister ON
+  static const int heaterOn = 1 << 9; // Bit 9 - Heater relay ON
   static const int simulation = 1 << 7; // Bit 7
 }

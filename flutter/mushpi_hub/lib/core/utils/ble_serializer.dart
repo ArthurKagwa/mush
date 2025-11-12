@@ -153,6 +153,10 @@ class BLEDataSerializer {
   /// - Bit 2: STAGE_READY - Ready for stage advancement
   /// - Bit 3: THRESHOLD_ALARM - Environmental threshold violation
   /// - Bit 4: CONNECTIVITY - BLE connected status
+  /// - Bit 5: LIGHT_ON - Grow light relay currently ON
+  /// - Bit 6: FAN_ON - Fan relay currently ON
+  /// - Bit 8: MIST_ON - Humidifier/mister relay ON
+  /// - Bit 9: HEATER_ON - Heater relay ON
   /// - Bit 7: SIMULATION - Device in simulation mode
   static int parseStatusFlags(List<int> data) {
     if (data.length != BLEConstants.statusDataSize) {

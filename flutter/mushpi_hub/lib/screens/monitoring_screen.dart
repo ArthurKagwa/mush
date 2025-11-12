@@ -4,6 +4,8 @@ import 'package:go_router/go_router.dart';
 
 import '../providers/farms_provider.dart';
 import '../providers/current_farm_provider.dart';
+import '../providers/actuator_state_provider.dart';
+import '../core/constants/ble_constants.dart';
 import '../data/models/farm.dart';
 
 /// Monitoring screen showing real-time environmental data and system status.
@@ -64,16 +66,20 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
               if (selectedFarmId == null || farms.isEmpty) {
                 return const SizedBox.shrink();
               }
-              
-              final selectedFarm = farms.where((f) => f.id == selectedFarmId).firstOrNull;
+
+              final selectedFarm =
+                  farms.where((f) => f.id == selectedFarmId).firstOrNull;
               if (selectedFarm == null) {
                 return const SizedBox.shrink();
               }
-              
+
               // Single source of truth: farm is online if lastActive < 1 minute
               final isOnline = selectedFarm.lastActive != null &&
-                  DateTime.now().difference(selectedFarm.lastActive!).inMinutes < 1;
-              
+                  DateTime.now()
+                          .difference(selectedFarm.lastActive!)
+                          .inMinutes <
+                      1;
+
               return Padding(
                 padding: const EdgeInsets.only(right: 8.0),
                 child: Center(
@@ -116,7 +122,8 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
                       );
                     },
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(
                         color: isOnline ? Colors.green : Colors.grey,
                         borderRadius: BorderRadius.circular(12),
@@ -169,7 +176,8 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
             return _FarmSelectorView(
               farms: farms,
               onSelectFarm: (farmId) {
-                ref.read(selectedMonitoringFarmIdProvider.notifier).state = farmId;
+                ref.read(selectedMonitoringFarmIdProvider.notifier).state =
+                    farmId;
               },
             );
           }
@@ -178,7 +186,8 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
           if (farms.length == 1 && selectedFarmId == null) {
             // Auto-select the only farm
             WidgetsBinding.instance.addPostFrameCallback((_) {
-              ref.read(selectedMonitoringFarmIdProvider.notifier).state = farms.first.id;
+              ref.read(selectedMonitoringFarmIdProvider.notifier).state =
+                  farms.first.id;
             });
           }
 
@@ -203,7 +212,9 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
                         farms: farms,
                         selectedFarmId: selectedFarmId,
                         onChanged: (farmId) {
-                          ref.read(selectedMonitoringFarmIdProvider.notifier).state = farmId;
+                          ref
+                              .read(selectedMonitoringFarmIdProvider.notifier)
+                              .state = farmId;
                         },
                       ),
                     ),
@@ -218,8 +229,11 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
                 ),
 
                 // Reconnect banner if farm is offline
-                if (selectedFarm.lastActive == null || 
-                    DateTime.now().difference(selectedFarm.lastActive!).inMinutes >= 30)
+                if (selectedFarm.lastActive == null ||
+                    DateTime.now()
+                            .difference(selectedFarm.lastActive!)
+                            .inMinutes >=
+                        30)
                   SliverToBoxAdapter(
                     child: Padding(
                       padding: const EdgeInsets.all(16.0),
@@ -232,15 +246,19 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
                             children: [
                               Row(
                                 children: [
-                                  Icon(Icons.warning_amber, color: Colors.orange.shade700),
+                                  Icon(Icons.warning_amber,
+                                      color: Colors.orange.shade700),
                                   const SizedBox(width: 12),
                                   Expanded(
                                     child: Text(
                                       'Not Connected',
-                                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                        color: Colors.orange.shade900,
-                                        fontWeight: FontWeight.bold,
-                                      ),
+                                      style: Theme.of(context)
+                                          .textTheme
+                                          .titleMedium
+                                          ?.copyWith(
+                                            color: Colors.orange.shade900,
+                                            fontWeight: FontWeight.bold,
+                                          ),
                                     ),
                                   ),
                                 ],
@@ -280,6 +298,16 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
 
                 const SliverToBoxAdapter(child: SizedBox(height: 16)),
 
+                // Actuator state/modes
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                    child: _ActuatorStateCard(),
+                  ),
+                ),
+
+                const SliverToBoxAdapter(child: SizedBox(height: 16)),
+
                 // Farm details
                 SliverToBoxAdapter(
                   child: Padding(
@@ -299,7 +327,8 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
                     padding: const EdgeInsets.symmetric(horizontal: 16.0),
                     child: _FarmInfoCard(
                       farm: selectedFarm,
-                      onViewDetails: () => context.push('/farm/${selectedFarm.id}'),
+                      onViewDetails: () =>
+                          context.push('/farm/${selectedFarm.id}'),
                     ),
                   ),
                 ),
@@ -404,13 +433,15 @@ class _FarmSelectorView extends StatelessWidget {
                               children: [
                                 Text(
                                   farm.name,
-                                  style: Theme.of(context).textTheme.titleMedium,
+                                  style:
+                                      Theme.of(context).textTheme.titleMedium,
                                 ),
                                 if (farm.location != null) ...[
                                   const SizedBox(height: 4),
                                   Text(
                                     farm.location!,
-                                    style: Theme.of(context).textTheme.bodySmall,
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
                                   ),
                                 ],
                               ],
@@ -505,9 +536,12 @@ class _FarmStatusCard extends StatelessWidget {
                   ),
                 ),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
-                    color: isOnline ? Colors.green.withOpacity(0.2) : Colors.grey.withOpacity(0.2),
+                    color: isOnline
+                        ? Colors.green.withOpacity(0.2)
+                        : Colors.grey.withOpacity(0.2),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Row(
@@ -733,7 +767,9 @@ class _EnvironmentalOverviewCard extends ConsumerWidget {
                       child: Text(
                         'No sensor data available',
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
                             ),
                       ),
                     ),
@@ -748,7 +784,8 @@ class _EnvironmentalOverviewCard extends ConsumerWidget {
                           child: _EnvironmentalMetric(
                             icon: Icons.thermostat,
                             label: 'Temperature',
-                            value: '${reading.temperatureC.toStringAsFixed(1)}°C',
+                            value:
+                                '${reading.temperatureC.toStringAsFixed(1)}°C',
                             color: _getTemperatureColor(reading.temperatureC),
                           ),
                         ),
@@ -756,7 +793,8 @@ class _EnvironmentalOverviewCard extends ConsumerWidget {
                           child: _EnvironmentalMetric(
                             icon: Icons.water_drop,
                             label: 'Humidity',
-                            value: '${reading.relativeHumidity.toStringAsFixed(0)}%',
+                            value:
+                                '${reading.relativeHumidity.toStringAsFixed(0)}%',
                             color: _getHumidityColor(reading.relativeHumidity),
                           ),
                         ),
@@ -957,6 +995,198 @@ class _EnvironmentalMetric extends StatelessWidget {
           ],
         ),
       ],
+    );
+  }
+}
+
+/// Actuator modes/state card
+class _ActuatorStateCard extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final targetsAsync = ref.watch(controlTargetsFutureProvider);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.settings_remote),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Actuators',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'Reload',
+                  onPressed: () => ref.refresh(controlTargetsFutureProvider),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            targetsAsync.when(
+              data: (targets) {
+                if (targets == null) {
+                  return _ActuatorUnavailable();
+                }
+
+                final theme = Theme.of(context);
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 12,
+                      runSpacing: 12,
+                      children: [
+                        _ActuatorChip(
+                          icon: Icons.lightbulb,
+                          label: 'Light',
+                          value: targets.lightMode.displayName,
+                          color: Colors.amber,
+                          subtitle: targets.lightMode == LightMode.cycle
+                              ? 'On ${targets.onMinutes}m / Off ${targets.offMinutes}m'
+                              : null,
+                        ),
+                        _ActuatorChip(
+                          icon: Icons.air,
+                          label: 'Fan',
+                          value: 'Auto',
+                          color: theme.colorScheme.primary,
+                          subtitle: 'State not reported',
+                        ),
+                        _ActuatorChip(
+                          icon: Icons.grain,
+                          label: 'Mist',
+                          value: 'Auto',
+                          color: theme.colorScheme.tertiary,
+                          subtitle: 'State not reported',
+                        ),
+                        _ActuatorChip(
+                          icon: Icons.local_fire_department,
+                          label: 'Heater',
+                          value: 'Auto',
+                          color: Colors.redAccent,
+                          subtitle: 'State not reported',
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Note: Real-time relay ON/OFF states are not yet exposed by the device; showing configured modes where available.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                );
+              },
+              loading: () => const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(8.0),
+                  child: CircularProgressIndicator(),
+                ),
+              ),
+              error: (_, __) => const _ActuatorUnavailable(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ActuatorChip extends StatelessWidget {
+  const _ActuatorChip({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+    this.subtitle,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+  final String? subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: color),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              Text(
+                value,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+              ),
+              if (subtitle != null)
+                Text(
+                  subtitle!,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: cs.onSurfaceVariant,
+                      ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActuatorUnavailable extends StatelessWidget {
+  const _ActuatorUnavailable();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline, color: cs.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Actuator modes unavailable. Connect to the device and tap reload.',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: cs.onSurfaceVariant,
+                  ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

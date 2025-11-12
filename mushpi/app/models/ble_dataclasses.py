@@ -34,6 +34,11 @@ class StatusFlags(IntFlag):
     STAGE_READY = 1 << 2      # Ready for stage advance
     THRESHOLD_ALARM = 1 << 3  # Threshold violation
     CONNECTIVITY = 1 << 4     # BLE connected
+    # Actuator state bits (live relay status)
+    LIGHT_ON = 1 << 5         # Grow light relay currently ON
+    FAN_ON = 1 << 6           # Exhaust / circulation fan ON
+    MIST_ON = 1 << 8          # Humidifier/mist relay ON
+    HEATER_ON = 1 << 9        # Heater relay ON
     SIMULATION = 1 << 7       # Simulation mode active
 
 

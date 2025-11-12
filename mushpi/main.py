@@ -3,6 +3,8 @@ from app.core import sensors, control, stage, ble_gatt
 from app.core.control import ControlSystem
 from app.core.stage import StageManager
 from app.database.manager import DatabaseManager
+from app.models.ble_dataclasses import StatusFlags
+from app.core import ble_gatt as ble_api
 import logging
 import time
 
@@ -144,9 +146,42 @@ def loop():
                 if actions:
                     logger.info(f"Control actions: {actions}")
                 
-                # Get control system status
+                # Get control system status (includes relay states)
                 status = control_system.get_status()
+                relay_states = status.get('relay_states', {})
                 logger.debug(f"Control status: {status}")
+
+                # Build status flags including actuator live states
+                try:
+                    flags = StatusFlags(0)
+                    # Preserve existing simulation flag
+                    if control_system.simulation_mode:
+                        flags |= StatusFlags.SIMULATION
+                    # Sensor/control error indicators
+                    if status.get('sensor_error'):
+                        flags |= StatusFlags.SENSOR_ERROR
+                    if status.get('control_error'):
+                        flags |= StatusFlags.CONTROL_ERROR
+                    # Threshold alarm
+                    if status.get('threshold_alarm'):
+                        flags |= StatusFlags.THRESHOLD_ALARM
+                    # Stage readiness (placeholder - implement real check later)
+                    if status.get('stage_ready'):
+                        flags |= StatusFlags.STAGE_READY
+                    # Actuator live states (Option A extension)
+                    if relay_states.get('grow_light') == 'ON':
+                        flags |= StatusFlags.LIGHT_ON
+                    if relay_states.get('exhaust_fan') == 'ON' or relay_states.get('circulation_fan') == 'ON':
+                        flags |= StatusFlags.FAN_ON
+                    if relay_states.get('humidifier') == 'ON':
+                        flags |= StatusFlags.MIST_ON
+                    if relay_states.get('heater') == 'ON':
+                        flags |= StatusFlags.HEATER_ON
+
+                    # Push updated status flags (connectivity bit added inside characteristic)
+                    ble_api.update_status_flags(flags)
+                except Exception as e:
+                    logger.debug(f"Could not update status flags: {e}")
                 
                 # Log BLE connection status
                 connection_count = ble_gatt.get_connection_count()
