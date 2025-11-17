@@ -407,48 +407,65 @@ class ControlSystem:
         self._update_controllers()
         
     def _update_controllers(self) -> None:
-        """Update hysteresis controllers based on current thresholds"""
+        """Update hysteresis controllers based on current thresholds
+        
+        Hysteresis logic:
+        - For "turn ON when too HIGH" (cooling): threshold_low = max - hysteresis, threshold_high = max
+          Turn ON when value >= max, turn OFF when value <= max - hysteresis
+        - For "turn ON when too LOW" (heating/humidifying): threshold_low = min, threshold_high = min + hysteresis  
+          Turn ON when value <= min, turn OFF when value >= min + hysteresis
+        """
         current_time = datetime.now()
         
         # Temperature controllers (fan and heater)
         if 'temperature' in self.current_thresholds:
             temp_threshold = self.current_thresholds['temperature']
             
-            # Fan controller (cooling)
+            # Fan controller (cooling) - turn ON when TOO HOT
             if temp_threshold.max_value is not None:
-                fan_high = temp_threshold.max_value
-                fan_low = fan_high - self.temp_hysteresis
+                fan_high = temp_threshold.max_value  # Turn ON at this temp
+                fan_low = fan_high - self.temp_hysteresis  # Turn OFF at this temp
                 self.controllers['fan_temp'] = HysteresisController(
                     'fan_temp', fan_low, fan_high
                 )
+                logger.debug(f"Fan cooling: ON >= {fan_high}°C, OFF <= {fan_low}°C")
                 
-            # Heater controller (heating)
+            # Heater controller (heating) - turn ON when TOO COLD
+            # INVERTED LOGIC: For heating, we want ON when value is LOW
+            # HysteresisController: Turn ON when value >= high, OFF when value <= low
+            # To turn ON when COLD: high = min (turn ON threshold), low = min - hysteresis (turn OFF threshold)
             if temp_threshold.min_value is not None:
-                heater_low = temp_threshold.min_value
-                heater_high = heater_low + self.temp_hysteresis
+                heater_high = temp_threshold.min_value  # Turn ON below this temp
+                heater_low = heater_high - self.temp_hysteresis  # Turn OFF below this temp
+                # NOTE: Controller will trigger ON when temp <= heater_high (inverted in process function)
                 self.controllers['heater'] = HysteresisController(
                     'heater', heater_low, heater_high
                 )
+                logger.debug(f"Heater: ON <= {heater_high}°C, OFF >= {heater_high + self.temp_hysteresis}°C")
                 
-        # Humidity controller (mist)
+        # Humidity controller (mist) - turn ON when TOO DRY
+        # INVERTED LOGIC: For humidifying, we want ON when value is LOW
         if 'humidity' in self.current_thresholds:
             humidity_threshold = self.current_thresholds['humidity']
             if humidity_threshold.min_value is not None:
-                mist_low = humidity_threshold.min_value + self.humidity_hysteresis
-                mist_high = humidity_threshold.min_value
+                mist_high = humidity_threshold.min_value  # Turn ON below this RH
+                mist_low = mist_high - self.humidity_hysteresis  # Turn OFF below this RH
+                # NOTE: Controller will trigger ON when RH <= mist_high (inverted in process function)
                 self.controllers['mist'] = HysteresisController(
                     'mist', mist_low, mist_high
                 )
+                logger.debug(f"Mist: ON <= {mist_high}%, OFF >= {mist_high + self.humidity_hysteresis}%")
                 
-        # CO2 controller (fan)
+        # CO2 controller (fan) - turn ON when TOO HIGH
         if 'co2' in self.current_thresholds:
             co2_threshold = self.current_thresholds['co2']
             if co2_threshold.max_value is not None:
-                fan_co2_high = co2_threshold.max_value
-                fan_co2_low = fan_co2_high - self.co2_hysteresis
+                fan_co2_high = co2_threshold.max_value  # Turn ON at this CO2
+                fan_co2_low = fan_co2_high - self.co2_hysteresis  # Turn OFF at this CO2
                 self.controllers['fan_co2'] = HysteresisController(
                     'fan_co2', fan_co2_low, fan_co2_high
                 )
+                logger.debug(f"Fan ventilation: ON >= {fan_co2_high}ppm, OFF <= {fan_co2_low}ppm")
                 
         logger.info(f"Updated {len(self.controllers)} controllers with new thresholds")
         
@@ -508,7 +525,7 @@ class ControlSystem:
         if reading.temperature_c is None:
             return actions
             
-        # Fan control for cooling
+        # Fan control for cooling (turn ON when TOO HOT)
         if 'fan_temp' in self.controllers:
             controller = self.controllers['fan_temp']
             new_state, reason = controller.update(reading.temperature_c, current_time)
@@ -522,10 +539,41 @@ class ControlSystem:
                     'exhaust_fan', new_state, f"Temperature {reason}", current_time
                 )
                 
-        # Heater control for heating
+        # Heater control for heating (turn ON when TOO COLD)
+        # INVERTED: HysteresisController expects ON when value >= high
+        # But we want ON when temp <= threshold, so we invert the controller state
         if 'heater' in self.controllers:
             controller = self.controllers['heater']
-            new_state, reason = controller.update(reading.temperature_c, current_time)
+            # Pass temperature value to controller (it will check if temp <= threshold)
+            controller_state, reason = controller.update(reading.temperature_c, current_time)
+            
+            # INVERT: If controller says OFF (temp >= threshold), we want heater ON
+            # If controller says ON (temp <= threshold), we want heater OFF
+            # Actually, let's use inverted value comparison
+            if reading.temperature_c <= controller.threshold_high:
+                # Temperature is below minimum - turn heater ON
+                if controller.current_state == RelayState.OFF:
+                    new_state = RelayState.ON
+                    reason = f"Value {reading.temperature_c:.1f} <= threshold {controller.threshold_high:.1f}"
+                else:
+                    new_state = RelayState.ON
+                    reason = "No change"
+            elif reading.temperature_c >= controller.threshold_high + self.temp_hysteresis:
+                # Temperature is above minimum + hysteresis - turn heater OFF  
+                if controller.current_state == RelayState.ON:
+                    new_state = RelayState.OFF
+                    reason = f"Value {reading.temperature_c:.1f} >= threshold {controller.threshold_high + self.temp_hysteresis:.1f}"
+                else:
+                    new_state = RelayState.OFF
+                    reason = "No change"
+            else:
+                # In hysteresis zone - maintain current state
+                new_state = controller.current_state
+                reason = "In hysteresis zone"
+            
+            # Update controller state
+            controller.current_state = new_state
+            controller.last_change_time = current_time
             
             actions['heater'] = self._set_relay_with_tracking(
                 'heater', new_state, f"Temperature {reason}", current_time
@@ -534,20 +582,45 @@ class ControlSystem:
         return actions
         
     def _process_humidity_control(self, reading: SensorReading, current_time: datetime) -> Dict[str, RelayAction]:
-        """Process humidity-based mist control"""
+        """Process humidity-based mist control (turn ON when TOO DRY)"""
         actions = {}
         
         if reading.humidity_percent is None or 'mist' not in self.controllers:
             return actions
             
         controller = self.controllers['mist']
-        new_state, reason = controller.update(reading.humidity_percent, current_time)
+        
+        # INVERTED LOGIC: Turn mist ON when humidity is LOW (below threshold)
+        if reading.humidity_percent <= controller.threshold_high:
+            # Humidity is below minimum - turn mist ON
+            if controller.current_state == RelayState.OFF:
+                new_state = RelayState.ON
+                reason = f"Value {reading.humidity_percent:.1f} <= threshold {controller.threshold_high:.1f}"
+            else:
+                new_state = RelayState.ON
+                reason = "No change"
+        elif reading.humidity_percent >= controller.threshold_high + self.humidity_hysteresis:
+            # Humidity is above minimum + hysteresis - turn mist OFF
+            if controller.current_state == RelayState.ON:
+                new_state = RelayState.OFF
+                reason = f"Value {reading.humidity_percent:.1f} >= threshold {controller.threshold_high + self.humidity_hysteresis:.1f}"
+            else:
+                new_state = RelayState.OFF
+                reason = "No change"
+        else:
+            # In hysteresis zone - maintain current state
+            new_state = controller.current_state
+            reason = "In hysteresis zone"
         
         # Check duty cycle before turning on
         if new_state == RelayState.ON and not self.duty_trackers['mist'].can_turn_on(current_time):
             logger.warning("Mist duty cycle limit reached - skipping ON command")
             return actions
-            
+        
+        # Update controller state
+        controller.current_state = new_state
+        controller.last_change_time = current_time
+        
         actions['mist'] = self._set_relay_with_tracking(
             'humidifier', new_state, f"Humidity {reason}", current_time
         )
@@ -555,7 +628,12 @@ class ControlSystem:
         return actions
         
     def _process_co2_control(self, reading: SensorReading, current_time: datetime) -> Dict[str, RelayAction]:
-        """Process CO2-based fan control"""
+        """Process CO2-based fan control (turn ON when TOO HIGH)
+        
+        NOTE: This shares the exhaust_fan relay with temperature control.
+        Fan should be ON if EITHER temperature OR CO2 is too high.
+        We use OR logic by checking if fan is already ON from temp control.
+        """
         actions = {}
         
         if reading.co2_ppm is None or 'fan_co2' not in self.controllers:
@@ -564,14 +642,32 @@ class ControlSystem:
         controller = self.controllers['fan_co2']
         new_state, reason = controller.update(reading.co2_ppm, current_time)
         
-        if new_state == RelayState.ON and self.duty_trackers['fan'].can_turn_on(current_time):
-            actions['fan_co2'] = self._set_relay_with_tracking(
-                'exhaust_fan', new_state, f"CO2 {reason}", current_time
-            )
+        # Check current fan state - don't turn OFF if temperature control wants it ON
+        current_fan_state = self.relay_manager.get_relay_state('exhaust_fan')
+        
+        if new_state == RelayState.ON:
+            # CO2 too high - turn fan ON (regardless of temp control)
+            if self.duty_trackers['fan'].can_turn_on(current_time):
+                actions['fan_co2'] = self._set_relay_with_tracking(
+                    'exhaust_fan', new_state, f"CO2 {reason}", current_time
+                )
         elif new_state == RelayState.OFF:
-            actions['fan_co2'] = self._set_relay_with_tracking(
-                'exhaust_fan', new_state, f"CO2 {reason}", current_time
-            )
+            # CO2 is OK - but only turn fan OFF if temp control also doesn't need it
+            # Check if fan_temp controller exists and wants fan ON
+            temp_wants_fan_on = False
+            if 'fan_temp' in self.controllers and reading.temperature_c is not None:
+                temp_controller = self.controllers['fan_temp']
+                # Check if temperature is above threshold
+                if reading.temperature_c >= temp_controller.threshold_high:
+                    temp_wants_fan_on = True
+            
+            # Only turn fan OFF if neither CO2 nor temperature needs it
+            if not temp_wants_fan_on:
+                actions['fan_co2'] = self._set_relay_with_tracking(
+                    'exhaust_fan', RelayState.OFF, f"CO2 {reason} (temp OK)", current_time
+                )
+            else:
+                logger.debug("CO2 normal but temperature still high - keeping fan ON")
             
         return actions
         

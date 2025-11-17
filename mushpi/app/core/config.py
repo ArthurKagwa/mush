@@ -113,6 +113,35 @@ class BluetoothConfig:
 
 
 @dataclass
+class StageConfig:
+    """Stage management configuration"""
+    config_path: Path
+    default_species: str
+    default_stage: str
+    default_mode: str
+    default_days: int
+    
+    def __post_init__(self):
+        """Ensure config_path is a Path object and handle directory creation"""
+        self.config_path = Path(self.config_path)
+        # Try to create parent directory if needed
+        try:
+            if not self.config_path.parent.exists():
+                self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Created directory: {self.config_path.parent}")
+        except PermissionError as e:
+            # If we can't create the directory, log a warning but don't fail
+            # The file might already exist, or we might be able to read from it
+            logger.warning(f"Permission denied creating directory {self.config_path.parent}: {e}")
+            logger.warning(f"Continuing with config_path={self.config_path}. Ensure the directory exists and is readable.")
+            if not self.config_path.exists() and not self.config_path.parent.exists():
+                raise PermissionError(
+                    f"Cannot create or access directory {self.config_path.parent}. "
+                    f"Please create it manually or update MUSHPI_STAGE_CONFIG_PATH environment variable."
+                ) from e
+
+
+@dataclass
 class LoggingConfig:
     """Logging configuration"""
     level: str
@@ -258,6 +287,21 @@ class ConfigurationManager:
             name_prefix=self._get_env_var('MUSHPI_BLE_NAME_PREFIX', 'MushPi')
         )
         
+        # Stage Management
+        stage_config_path = self._get_env_var('MUSHPI_STAGE_CONFIG_PATH', 'data/stage_config.json')
+        if not Path(stage_config_path).is_absolute():
+            stage_config_path = self.paths.app_dir / stage_config_path
+        else:
+            stage_config_path = Path(stage_config_path)
+            
+        self.stage = StageConfig(
+            config_path=stage_config_path,
+            default_species=self._get_env_var('MUSHPI_STAGE_DEFAULT_SPECIES', 'Oyster'),
+            default_stage=self._get_env_var('MUSHPI_STAGE_DEFAULT_STAGE', 'Pinning'),
+            default_mode=self._get_env_var('MUSHPI_STAGE_DEFAULT_MODE', 'semi'),
+            default_days=self._get_env_var('MUSHPI_STAGE_DEFAULT_DAYS', 5, int)
+        )
+        
         # Logging
         self.logging = LoggingConfig(
             level=self._get_env_var('MUSHPI_LOG_LEVEL', 'INFO'),
@@ -308,6 +352,16 @@ class ConfigurationManager:
                 logger.error("All timing intervals must be positive")
                 return False
                 
+            # Validate stage configuration
+            valid_modes = ['full', 'semi', 'manual']
+            if self.stage.default_mode.lower() not in valid_modes:
+                logger.error(f"Invalid stage mode: {self.stage.default_mode}. Must be one of {valid_modes}")
+                return False
+                
+            if self.stage.default_days <= 0:
+                logger.error(f"Invalid stage default days: {self.stage.default_days}. Must be positive")
+                return False
+                
             # Validate log level
             valid_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
             if self.logging.level.upper() not in valid_levels:
@@ -329,7 +383,8 @@ class ConfigurationManager:
                 'data_dir': str(self.paths.data_dir),
                 'config_dir': str(self.paths.config_dir),
                 'database': str(self.database.path),
-                'thresholds': str(self.thresholds_path)
+                'thresholds': str(self.thresholds_path),
+                'stage_config': str(self.stage.config_path)
             },
             'gpio': {
                 'dht22_pin': self.gpio.dht22_pin,
@@ -346,6 +401,13 @@ class ConfigurationManager:
                     'dht22': self.timing.dht22_interval,
                     'light': self.timing.light_interval
                 }
+            },
+            'stage': {
+                'config_path': str(self.stage.config_path),
+                'default_species': self.stage.default_species,
+                'default_stage': self.stage.default_stage,
+                'default_mode': self.stage.default_mode,
+                'default_days': self.stage.default_days
             },
             'modes': {
                 'simulation': self.development.simulation_mode,

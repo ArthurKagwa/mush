@@ -11,9 +11,8 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 
-from ..models.dataclasses import SensorReading, ThresholdEvent
+from ..models.dataclasses import SensorReading
 from ..database.manager import DatabaseManager
-from ..managers.threshold_manager import ThresholdManager
 from ..sensors.scd41 import SCD41Sensor
 from ..sensors.dht22 import DHT22Sensor
 from ..sensors.light_sensor import LightSensor
@@ -27,9 +26,8 @@ logger = logging.getLogger(__name__)
 class SensorManager:
     """Main sensor management class - coordinates all sensors with fallback logic"""
     
-    def __init__(self, db_manager: DatabaseManager = None, threshold_manager: ThresholdManager = None):
+    def __init__(self, db_manager: DatabaseManager = None):
         self.db_manager = db_manager or DatabaseManager()
-        self.threshold_manager = threshold_manager or ThresholdManager(db_manager=self.db_manager)
         
         # Initialize sensors
         self.scd41 = None
@@ -168,17 +166,8 @@ class SensorManager:
                 self.db_manager.save_reading(reading)
                 logger.debug("✅ Reading saved to database")
                 
-                # Check thresholds
-                threshold_events = self.threshold_manager.check_thresholds(reading)
-                
-                # Log and save threshold events
-                for event in threshold_events:
-                    logger.warning(f"Threshold violation: {event.parameter} = {event.current_value} "
-                                 f"({event.threshold_type} threshold: {event.threshold_value})")
-                    self.db_manager.save_threshold_event(event)
-                    
                 # Log current status
-                self._log_reading_status(reading, threshold_events)
+                self._log_reading_status(reading)
                 
             except Exception as e:
                 logger.error(f"Error in sensor monitoring loop: {e}", exc_info=True)
@@ -186,7 +175,7 @@ class SensorManager:
             # Wait for next reading
             time.sleep(self.monitor_interval)
             
-    def _log_reading_status(self, reading: SensorReading, events: List[ThresholdEvent]) -> None:
+    def _log_reading_status(self, reading: SensorReading) -> None:
         """Log current sensor status"""
         status_parts = []
         
@@ -200,11 +189,7 @@ class SensorManager:
             status_parts.append(f"Light:{reading.light_level:.0f}")
             
         status = " | ".join(status_parts)
-        
-        if events:
-            logger.info(f"📊 {status} | ⚠️ {len(events)} threshold violations | {reading.sensor_source}")
-        else:
-            logger.info(f"📊 {status} | ✅ All thresholds OK | {reading.sensor_source}")
+        logger.info(f"📊 {status} | {reading.sensor_source}")
             
     def get_sensor_status(self) -> Dict[str, Any]:
         """Get detailed sensor status information"""

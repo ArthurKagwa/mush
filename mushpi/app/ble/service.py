@@ -36,10 +36,15 @@ from .backends import select_backend
 from .characteristics.environmental import EnvironmentalMeasurementsCharacteristic
 from .characteristics.control_targets import ControlTargetsCharacteristic
 from .characteristics.stage_state import StageStateCharacteristic
+from .characteristics.stage_thresholds import StageThresholdsCharacteristic
 from .characteristics.override_bits import OverrideBitsCharacteristic
 from .characteristics.status_flags import StatusFlagsCharacteristic
 from .characteristics.uart import UARTRXCharacteristic, UARTTXCharacteristic
 from .uuids import UART_SERVICE_UUID
+from .characteristics.config_version import ConfigVersionCharacteristic
+from .characteristics.config_out import ConfigOutCharacteristic
+from .characteristics.config_ctrl import ConfigControlCharacteristic
+from .characteristics.config_in import ConfigInCharacteristic
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +101,8 @@ class BLEGATTServiceManager:
 
         # In simulation mode we still need characteristic containers for callbacks
         if self.simulation_mode:
-            self._build_characteristics(service=None)
+            # Build characteristic containers without binding to a real service
+            self._build_characteristics(main_service=None, uart_service=None)
         
     def initialize(self) -> bool:
         """Initialize BLE adapter and services.
@@ -292,6 +298,7 @@ class BLEGATTServiceManager:
     def _build_characteristics(self, main_service, uart_service):
         """Instantiate all BLE characteristics against the provided services"""
         try:
+            # Base set of characteristics (backward-compatible set)
             self.characteristics = {
                 'env_measurements': EnvironmentalMeasurementsCharacteristic(
                     main_service, self.simulation_mode
@@ -300,6 +307,9 @@ class BLEGATTServiceManager:
                     main_service, self.simulation_mode
                 ),
                 'stage_state': StageStateCharacteristic(
+                    main_service, self.simulation_mode
+                ),
+                'stage_thresholds': StageThresholdsCharacteristic(
                     main_service, self.simulation_mode
                 ),
                 'override_bits': OverrideBitsCharacteristic(
@@ -313,8 +323,44 @@ class BLEGATTServiceManager:
                 ),
                 'uart_tx': UARTTXCharacteristic(
                     uart_service, self.simulation_mode
+                ),
+                # Config service extension (shares primary service)
+                'config_version': ConfigVersionCharacteristic(
+                    main_service, self.simulation_mode
+                ),
+                'config_out': ConfigOutCharacteristic(
+                    main_service, self.simulation_mode
                 )
             }
+
+            # Control + In depend on out + version
+            try:
+                self.characteristics['config_ctrl'] = ConfigControlCharacteristic(
+                    main_service, self.simulation_mode,
+                    out_char=self.characteristics['config_out'],
+                    version_char=self.characteristics['config_version']
+                )
+                self.characteristics['config_in'] = ConfigInCharacteristic(
+                    main_service, self.simulation_mode,
+                    ctrl_char=self.characteristics['config_ctrl'],
+                    out_char=self.characteristics['config_out']
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize config characteristics: {e}")
+
+            # Optional: actuator status characteristic (feature-gated)
+            try:
+                if bool(self._ble_cfg.get('actuator_status_enable', False)):
+                    # Import only when enabled to avoid unintended side effects
+                    from .characteristics.actuator_status import ActuatorStatusCharacteristic
+                    self.characteristics['actuator_status'] = ActuatorStatusCharacteristic(
+                        main_service, self.simulation_mode
+                    )
+                    logger.info("Actuator status characteristic enabled via env flag")
+                else:
+                    logger.debug("Actuator status characteristic disabled (back-compat)")
+            except Exception as e:
+                logger.warning(f"Could not initialize actuator status characteristic: {e}")
 
             logger.debug(
                 "BLE characteristics created (simulation=%s, main_service_bound=%s, uart_service_bound=%s)",
@@ -552,13 +598,19 @@ class BLEGATTServiceManager:
             if env_char and 'get_sensor_data' in callbacks:
                 env_char.set_sensor_callback(callbacks['get_sensor_data'])
             
-            # Control targets callbacks
+            # Control targets callbacks - use get_control_targets for thresholds
             control_char = self.characteristics.get('control_targets')
-            if control_char and 'get_control_data' in callbacks and 'set_control_targets' in callbacks:
-                control_char.set_control_callbacks(
-                    callbacks['get_control_data'],
-                    callbacks['set_control_targets']
-                )
+            if control_char:
+                # Prefer get_control_targets if available, fallback to get_control_data
+                get_callback = callbacks.get('get_control_targets') or callbacks.get('get_control_data')
+                set_callback = callbacks.get('set_control_targets')
+                if get_callback and set_callback:
+                    control_char.set_control_callbacks(get_callback, set_callback)
+
+            # Actuator status uses the control data getter to compute bits
+            actuator_char = self.characteristics.get('actuator_status')
+            if actuator_char and 'get_control_data' in callbacks:
+                actuator_char.set_control_callback(callbacks['get_control_data'])
             
             # Stage state callbacks
             stage_char = self.characteristics.get('stage_state')
@@ -566,6 +618,14 @@ class BLEGATTServiceManager:
                 stage_char.set_stage_callbacks(
                     callbacks['get_stage_data'],
                     callbacks['set_stage_state']
+                )
+            
+            # Stage thresholds callbacks
+            stage_thresh_char = self.characteristics.get('stage_thresholds')
+            if stage_thresh_char and 'get_stage_thresholds' in callbacks and 'set_stage_thresholds' in callbacks:
+                stage_thresh_char.set_stage_thresholds_callbacks(
+                    callbacks['get_stage_thresholds'],
+                    callbacks['set_stage_thresholds']
                 )
             
             # Override bits callback
@@ -618,6 +678,16 @@ class BLEGATTServiceManager:
                     self._enqueue_notification('status_flags', connected_devices)
         except Exception as e:
             logger.error(f"Error queuing status flags notification: {e}")
+
+    def notify_actuator_status(self, connected_devices: Set[str]):
+        """Notify clients with current actuator status bits"""
+        try:
+            actuator_char = self.characteristics.get('actuator_status')
+            if actuator_char:
+                if connected_devices:
+                    self._enqueue_notification('actuator_status', connected_devices)
+        except Exception as e:
+            logger.error(f"Error queuing actuator status notification: {e}")
     
     def is_running(self) -> bool:
         """Check if BLE GATT service is running
@@ -971,6 +1041,8 @@ class BLEGATTServiceManager:
             'adv_register_retries': _get_int('MUSHPI_BLE_ADV_REGISTER_RETRIES', 0),
             'adv_backoff_base_ms': _get_int('MUSHPI_BLE_ADV_REGISTER_BACKOFF_MS', 0),
             'adv_backoff_max_ms': _get_int('MUSHPI_BLE_ADV_REGISTER_BACKOFF_MAX_MS', 0),
+            # Feature gates (default off for backward compatibility)
+            'actuator_status_enable': _get_bool('MUSHPI_BLE_ACTUATOR_STATUS_ENABLE', False),
         }
 
     def _init_notification_worker(self):

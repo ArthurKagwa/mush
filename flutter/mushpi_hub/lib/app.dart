@@ -26,6 +26,12 @@ class MushPiApp extends ConsumerStatefulWidget {
   ConsumerState<MushPiApp> createState() => _MushPiAppState();
 }
 
+/// Global route observer for screen-level lifecycle (used by StageScreen to
+/// trigger refreshes when revisited). Keeping this here avoids hard-coded
+/// observers scattered across feature modules and allows future reuse.
+final RouteObserver<ModalRoute<void>> routeObserver =
+    RouteObserver<ModalRoute<void>>();
+
 class _MushPiAppState extends ConsumerState<MushPiApp> {
   bool _autoReconnectInitialized = false;
 
@@ -64,7 +70,7 @@ class _MushPiAppState extends ConsumerState<MushPiApp> {
   }
 
   /// Initialize auto-reconnect service
-  /// 
+  ///
   /// Attempts to reconnect to the last connected device on app startup
   /// if auto-reconnect is enabled and a device was previously connected.
   void _initializeAutoReconnect() {
@@ -72,24 +78,27 @@ class _MushPiAppState extends ConsumerState<MushPiApp> {
     // Add delay to ensure database and BLE are fully initialized
     Future.delayed(const Duration(seconds: 2), () async {
       try {
-        debugPrint('🔄 [AUTO-RECONNECT] Initializing auto-reconnect service...');
+        debugPrint(
+            '🔄 [AUTO-RECONNECT] Initializing auto-reconnect service...');
         final autoReconnect = ref.read(autoReconnectServiceProvider);
-        
+
         // Check if auto-reconnect is enabled
         final isEnabled = await autoReconnect.isEnabled();
         debugPrint('🔄 [AUTO-RECONNECT] Auto-reconnect enabled: $isEnabled');
-        
+
         if (!isEnabled) {
-          debugPrint('🔄 [AUTO-RECONNECT] Auto-reconnect is disabled, skipping');
+          debugPrint(
+              '🔄 [AUTO-RECONNECT] Auto-reconnect is disabled, skipping');
           return;
         }
 
         // Attempt reconnection in background
         debugPrint('🔄 [AUTO-RECONNECT] Starting reconnection attempt...');
         final success = await autoReconnect.attemptReconnection();
-        
+
         if (success) {
-          debugPrint('✅ [AUTO-RECONNECT] Successfully reconnected to saved device');
+          debugPrint(
+              '✅ [AUTO-RECONNECT] Successfully reconnected to saved device');
         } else {
           debugPrint('❌ [AUTO-RECONNECT] Failed to reconnect to saved device');
         }
@@ -106,6 +115,10 @@ final routerProvider = Provider<GoRouter>((ref) {
   return GoRouter(
     initialLocation: '/',
     debugLogDiagnostics: true,
+    // Expose navigator observers so feature screens can react to navigation
+    // events (e.g., StageScreen refresh on didPopNext). RouteObserver is
+    // lightweight and does not block other navigation concerns.
+    observers: [routeObserver],
     routes: [
       // Splash screen
       GoRoute(

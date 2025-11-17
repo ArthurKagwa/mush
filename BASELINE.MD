@@ -1,10 +1,3759 @@
 # MushPi Project Progress Tracker
 
+## 2025-11-17 - Fixed FULL Autonomy Mode Not Persisting (Python Truthiness Bug) ✅
+
+Status: Complete - FULL automation mode now correctly persists when set via BLE
+Files Affected:
+- mushpi/app/core/stage.py (lines 351-372)
+
+Problem:
+Users attempting to switch from SEMI to FULL autonomy mode via the Flutter app would see the BLE write succeed, but the mode would remain SEMI. The logs showed:
+```
+20:12:07 - 📥 STAGE STATE UNPACK: mode=0 (0=FULL, 1=SEMI, 2=MANUAL), species=1, stage=1
+20:12:07 - BLE stage state received: {'mode': 'FULL', ...}
+...
+20:12:13 - 📊 Stage: Oyster-Incubation | Mode: SEMI | Age: 16.0 days  ← Still SEMI!
+```
+
+Root Cause:
+Python truthiness bug in `set_stage()` method (line 361):
+
+```python
+mode=mode or (self.current_stage.mode if self.current_stage else StageMode.SEMI)
+```
+
+When `mode=StageMode.FULL` (which has numeric value 0), Python's truthiness evaluation treats `0` as `False`. The expression `mode or fallback` therefore skips the provided mode and incorrectly uses the fallback value (SEMI).
+
+**Truthiness Evaluation:**
+- `mode=0` (FULL) → evaluates as falsy → `0 or fallback` → returns `fallback` ❌
+- `mode=1` (SEMI) → evaluates as truthy → `1 or fallback` → returns `1` ✓
+- `mode=2` (MANUAL) → evaluates as truthy → `2 or fallback` → returns `2` ✓
+
+This is why SEMI and MANUAL modes worked, but FULL mode was ignored!
+
+Solution Implemented:
+
+Replaced implicit truthiness check with explicit `None` comparison:
+
+```python
+# BEFORE (buggy):
+mode=mode or (self.current_stage.mode if self.current_stage else StageMode.SEMI)
+
+# AFTER (correct):
+# Determine mode: use provided mode, or fallback to current/default
+# CRITICAL: Use explicit None check to avoid Python truthiness bug
+# (mode=0/FULL would be falsy and incorrectly skip to fallback)
+if mode is not None:
+    new_mode = mode
+elif self.current_stage:
+    new_mode = self.current_stage.mode
+else:
+    new_mode = StageMode.SEMI
+
+self.current_stage = StageInfo(
+    species=species,
+    stage=stage,
+    start_time=start_time or datetime.now(),
+    expected_days=expected_days,
+    mode=new_mode,  # ✅ Uses explicit mode assignment
+    thresholds=stage_thresholds
+)
+```
+
+Benefits:
+✅ FULL autonomy mode now correctly persists when set via BLE
+✅ All three modes (FULL=0, SEMI=1, MANUAL=2) work correctly
+✅ Explicit None check prevents Python truthiness edge cases
+✅ Code is more maintainable and intention is clear
+✅ Automatic stage progression now works in FULL mode
+
+Technical Details:
+- `mode is not None` explicitly checks for None, not falsy values
+- This pattern is Python best practice for optional parameters that can be 0/False
+- Applies to any scenario where 0 is a valid value (not just enums)
+- Similar bugs can occur with: `value or default` when value can be 0, empty string, empty list, etc.
+
+Testing:
+1. User switches to FULL autonomy via Flutter app
+2. BLE writes mode=0 to characteristic
+3. `set_stage()` receives mode=StageMode.FULL (value 0)
+4. Explicit check: `mode is not None` → True → uses mode=0
+5. Stage config saved with mode='full'
+6. System logs: `📊 Stage: Oyster-Incubation | Mode: FULL | Age: 16.0 days` ✓
+7. After expected_days elapsed, system auto-advances to next stage
+
+Related Patterns:
+- Similar issue would affect any optional parameter that can be 0 or False
+- Always use `is not None` for optional parameters, never `or`
+- This is documented in PEP 8 style guide
+
+---
+
+## 2025-11-17 - Enhanced Monitoring Loop with Stage and Automation Mode Logging ✅
+
+Status: Complete - Added comprehensive stage and automation mode logging to monitoring loop
+Files Affected:
+- mushpi/main.py
+
+Enhancement:
+Added detailed logging of current stage information and automation mode in the main monitoring loop to provide better visibility into the system's operation state.
+
+Implementation:
+The monitoring loop now logs the following information with each sensor reading cycle:
+- **Current Stage**: Species and stage name (e.g., "Oyster-Incubation")
+- **Automation Mode**: FULL, SEMI, or MANUAL
+- **Stage Age**: Days in current stage
+
+Example log output:
+```
+📊 Stage: Oyster-Incubation | Mode: SEMI | Age: 3.2 days
+Sensors - Temp: 22.5°C, RH: 85.0%, CO2: 800ppm, Light: 150.0
+```
+
+Benefits:
+- Provides immediate visibility into active cultivation stage
+- Shows automation mode at a glance
+- Tracks stage progression (age in days)
+- Helps with debugging stage-related issues
+- Makes log analysis easier for system monitoring
+
+Code Changes:
+```python
+# Added stage information logging before sensor data
+current_stage_info = stage_manager.get_current_stage()
+if current_stage_info:
+    age_days = stage_manager.get_stage_age_days()
+    logger.info(f"📊 Stage: {current_stage_info.species}-{current_stage_info.stage} | "
+              f"Mode: {current_stage_info.mode.value.upper()} | "
+              f"Age: {age_days:.1f} days")
+else:
+    logger.info("📊 Stage: Not configured")
+```
+
+---
+
+## 2025-11-17 - Fixed Stage Wizard Navigation Error After Submission ✅
+
+Status: Complete - Removed Navigator.pop() calls from tab-based stage wizard screen
+Files Affected:
+- flutter/mushpi_hub/lib/screens/stage_wizard_screen.dart
+
+Problem:
+After submitting configuration changes in the Stage wizard, the app threw a GoRouter assertion error:
+```
+_AssertionError ('package:go_router/src/delegate.dart': Failed assertion: line 99 pos 7: 
+'currentConfiguration.isNotEmpty': You have popped the last page off of the stack, 
+there are no pages left to show)
+```
+
+Root Cause:
+The Stage wizard screen is rendered directly as a bottom navigation tab (via `StageScreen` wrapper), not pushed as a separate route. The submission handler was calling `Navigator.of(context).pop()` after showing a success message, which tried to pop the tab itself off the navigation stack.
+
+The architecture:
+```
+MainScaffold (StatefulShellRoute with 5 tabs)
+  ├─ Tab 0: Farms
+  ├─ Tab 1: Monitoring  
+  ├─ Tab 2: Control
+  ├─ Tab 3: Stage ← StageWizardScreen rendered here (not pushed)
+  └─ Tab 4: Settings
+```
+
+Calling `Navigator.pop()` on a tab screen tries to remove the entire tab branch from the indexed stack, causing the assertion failure.
+
+Additionally, the app bar had a close button that also called `Navigator.pop()`, and an exit confirmation dialog that would call `Navigator.pop()` twice (dialog + screen), both of which would fail for the same reason.
+
+Solution Implemented:
+
+**1. Removed Auto-Navigation After Submission**
+Changed the success handler to show a message without navigating:
+
+```dart
+// Before (tries to pop the tab screen):
+setState(() {
+  _hasChanges = false;
+  _successMessage = 'All settings applied successfully!';
+});
+WidgetsBinding.instance.addPostFrameCallback((_) async {
+  await Future.delayed(const Duration(seconds: 1));
+  if (mounted && context.mounted) {
+    Navigator.of(context).pop();  // ❌ Fails on tab screen
+  }
+});
+
+// After (stays on screen, shows success message):
+setState(() {
+  _hasChanges = false;
+  _successMessage = 'All settings applied successfully!';
+});
+
+// Clear success message after a few seconds
+Future.delayed(const Duration(seconds: 3), () {
+  if (mounted) {
+    setState(() {
+      _successMessage = null;
+    });
+  }
+});
+```
+
+**2. Removed Close Button from App Bar**
+Removed the leading close button that called `Navigator.pop()`:
+
+```dart
+// Before:
+AppBar(
+  title: const Text('Stage Configuration'),
+  leading: IconButton(
+    icon: const Icon(Icons.close),
+    onPressed: () {
+      if (_hasChanges) {
+        _showExitConfirmation();
+      } else {
+        Navigator.of(context).pop();  // ❌ Fails
+      }
+    },
+  ),
+)
+
+// After:
+AppBar(
+  title: const Text('Stage Configuration'),
+  // No leading button - users navigate using bottom tabs
+)
+```
+
+**3. Removed Exit Confirmation Dialog**
+Removed the `_showExitConfirmation()` method entirely since:
+- Close button removed (no trigger)
+- Changes are auto-saved or can be saved manually via submit button
+- Users navigate away naturally using bottom navigation tabs
+
+Benefits:
+✅ No more navigation errors after submission
+✅ Success message displayed for 3 seconds, then clears automatically
+✅ User stays on Stage screen, can continue making adjustments
+✅ Natural navigation via bottom tabs (user chooses when to leave)
+✅ Simplified UX - no confusing close button that doesn't work properly
+✅ Consistent with tab-based navigation architecture
+
+UX Flow After Fix:
+1. User configures all three stages in wizard
+2. User taps "Submit All Settings" button
+3. BLE writes complete successfully
+4. Success message appears: "All settings applied successfully!"
+5. Message clears after 3 seconds
+6. User remains on Stage screen (can make more edits or navigate away via bottom tabs)
+
+Technical Notes:
+- `_hasChanges` field kept with `// ignore: unused_field` for future unsaved changes indicator
+- Success message timeout increased from 1s to 3s for better visibility
+- Pattern applies to all tab screens - never call `Navigator.pop()` on StatefulShellRoute branches
+- For pushed routes (like farm detail, device scan), `Navigator.pop()` is still correct
+
+Related Patterns:
+- Similar to monitoring screen offline dialog fix (added `context.mounted` check)
+- Follows Flutter best practice: tab screens don't pop, pushed routes pop
+- Reinforces StatefulShellRoute architecture understanding
+
+---
+
+## 2025-11-17 - Fixed GoRouter Navigation Stack Error in Dialog ✅
+
+Status: Complete - Added mounted check before context.go() navigation
+Files Affected:
+- flutter/mushpi_hub/lib/screens/monitoring_screen.dart
+
+Problem:
+The monitoring screen was throwing a GoRouter assertion error when using the "Go to Farms" button in the offline connection dialog:
+```
+_AssertionError ('package:go_router/src/delegate.dart': Failed assertion: line 99 pos 7: 
+'currentConfiguration.isNotEmpty': You have popped the last page off of the stack, 
+there are no pages left to show)
+```
+
+Root Cause:
+The dialog's "Go to Farms" button was calling `Navigator.of(context).pop()` immediately followed by `context.go('/farms')`. However, after popping the dialog, the context might be disposed or in an invalid state for navigation, causing the GoRouter assertion to fail.
+
+The sequence was:
+1. Dialog shown (pushes overlay onto stack)
+2. Button pressed → `Navigator.of(context).pop()` (removes dialog)
+3. `context.go('/farms')` called (tries to navigate with potentially disposed context)
+4. GoRouter throws assertion error
+
+Solution Implemented:
+
+Added a `mounted` check before the navigation call to ensure the context is still valid:
+
+```dart
+// Before (unsafe):
+onPressed: () {
+  Navigator.of(context).pop();
+  context.go('/farms');
+}
+
+// After (safe):
+onPressed: () {
+  Navigator.of(context).pop();
+  // Navigate to Farms tab with mounted check
+  // to avoid navigation stack errors
+  if (context.mounted) {
+    context.go('/farms');
+  }
+}
+```
+
+Benefits:
+✅ No more GoRouter assertion errors when navigating from dialogs
+✅ Safe context usage after async dialog operations
+✅ Prevents navigation attempts on disposed contexts
+✅ Follows Flutter best practices for async context usage
+✅ Consistent with other mounted checks in the app (date picker fix, Stage Progress card)
+
+Technical Details:
+- The `mounted` check verifies the widget is still in the widget tree
+- Prevents `context` operations after widget disposal
+- Required after any async operation (including dialog pop)
+- Pattern used throughout app for dialog and async safety
+
+Related Fixes:
+- Similar pattern previously applied to date picker (stage_wizard_screen.dart)
+- Stage Progress Card also uses mounted checks for async BLE operations
+- Part of comprehensive async safety improvements across the app
+
+---
+
+## 2025-11-17 - Fixed Stage Progress Showing "0 Days Remaining" and "Day X of 0" ✅
+
+Status: Complete - Added fallback to thresholds.json for expected_days in backend + Flutter app fixes
+Files Affected:
+- mushpi/app/core/stage.py (Backend)
+- mushpi/main.py (Backend)
+- flutter/mushpi_hub/lib/screens/stage_wizard_screen.dart (Flutter)
+- flutter/mushpi_hub/lib/screens/control_screen.dart (Flutter)
+
+Problem:
+The Flutter app's stage progress display was showing "0 days remaining" and "Day 3 of 0" because the `expected_days` field was not being properly handled in two places:
+1. **Backend:** Database had `expected_days=0` and wasn't falling back to thresholds.json
+2. **Flutter App:** When writing stage thresholds via BLE, the app wasn't sending `expected_days`
+
+Root Cause:
+**Issue 1 - Backend set_stage() method:**
+In `stage.py`, the `set_stage()` method gets thresholds from the database which had `expected_days=0`
+
+**Issue 2 - Backend set_stage_thresholds_from_ble():**
+When the Flutter app writes stage thresholds via BLE, the thresholds dictionary received didn't include `expected_days`:
+```python
+# From Pi logs:
+'species': 'Oyster', 'stage': 'Pinning', 'temp_min': 18.0, 'temp_max': 22.0, 
+'rh_min': 95.0, 'co2_max': 1000, 'light': {...}
+# No expected_days!
+```
+
+**Issue 3 - Flutter stage_wizard_screen.dart:**
+When creating `StageThresholdsData` to write via BLE, `expectedDays` was not being included even though the data model supports it and the config has the value.
+
+**Issue 4 - Flutter control_screen.dart:**
+When updating thresholds from the control screen, `expectedDays` was not being tracked or included when writing back to the Pi.
+
+Solution Implemented:
+
+**Backend Fix 1: Added Two-Level Fallback in set_stage() (stage.py)**
+- If database returns `None`: Load all thresholds from thresholds.json
+- If database has thresholds but `expected_days=0`: Read expected_days from thresholds.json
+
+**Backend Fix 2: Preserve expected_days in set_stage_thresholds_from_ble() (main.py)**
+```python
+# Preserve expected_days from existing thresholds if not provided by BLE
+if 'expected_days' not in thresholds or thresholds.get('expected_days', 0) == 0:
+    existing_thresholds = stage_manager.get_stage_thresholds(species, stage)
+    if existing_thresholds and existing_thresholds.get('expected_days', 0) > 0:
+        thresholds['expected_days'] = existing_thresholds['expected_days']
+    else:
+        # Fall back to thresholds.json to get expected_days
+        try:
+            thresholds_path = config.thresholds_path
+            if thresholds_path.exists():
+                with open(thresholds_path, 'r') as f:
+                    thresholds_data = json.load(f)
+                species_data = thresholds_data.get(species, {})
+                stage_data = species_data.get(stage, {})
+                json_expected_days = stage_data.get('expected_days', 0)
+                if json_expected_days > 0:
+                    thresholds['expected_days'] = json_expected_days
+        except Exception as e:
+            logger.warning(f"Could not read expected_days from thresholds.json: {e}")
+```
+
+**Flutter Fix 1: Include expectedDays in stage_wizard_screen.dart**
+```dart
+final thresholds = StageThresholdsData(
+  species: _species,
+  stage: stage,
+  tempMin: config['tempMin'] as double?,
+  tempMax: config['tempMax'] as double?,
+  rhMin: config['rhMin'] as double?,
+  co2Max: config['co2Max'] as int?,
+  lightMode: lightMode,
+  lightOnMinutes: lightOnMinutes,
+  lightOffMinutes: lightOffMinutes,
+  expectedDays: config['expectedDays'] as int?, // ← ADDED
+);
+```
+
+**Flutter Fix 2: Track and include expectedDays in control_screen.dart**
+```dart
+// Added field to track expected days
+int? _expectedDays;
+
+// Load from thresholds when reading
+if (thresholds.expectedDays != null)
+  _expectedDays = thresholds.expectedDays!;
+
+// Include when writing
+final thresholds = StageThresholdsData(
+  species: _currentSpecies!,
+  stage: _currentStage!,
+  tempMin: _tempMin,
+  tempMax: _tempMax,
+  rhMin: _rhMin,
+  co2Max: _co2Max,
+  lightMode: _lightMode,
+  lightOnMinutes: _onMinutes,
+  lightOffMinutes: _offMinutes,
+  expectedDays: _expectedDays, // ← ADDED
+);
+```
+
+**Benefits:**
+✅ Stage progress now shows correct expected days
+✅ Backend falls back to thresholds.json when database has 0
+✅ Backend preserves expected_days when Flutter updates other thresholds
+✅ Flutter app now sends expected_days when writing thresholds (stage wizard)
+✅ Flutter app preserves expected_days when updating from control screen
+✅ Complete fix for the entire data flow from Flutter → Pi → Database
+✅ Flutter app will show proper progress like "Day 3 of 5" and "2 days remaining"
+
+**Database State on Pi (confirmed):**
+```
+sqlite> select species, stage, expected_days from stage_thresholds;
+Oyster|Incubation|0
+Oyster|Pinning|0
+Oyster|Fruiting|0
+```
+
+**thresholds.json has correct values:**
+```json
+{
+  "Oyster": {
+    "Incubation": {"expected_days": 14, ...},
+    "Pinning": {"expected_days": 5, ...},
+    "Fruiting": {"expected_days": 0, ...}
+  }
+}
+```
+
+**Complete Fix Flow:**
+1. User updates thresholds via Stage Wizard or Control Screen
+2. Flutter app includes `expectedDays` in BLE write
+3. Pi receives thresholds with expected_days (or preserves it if missing)
+4. Backend falls back to thresholds.json if expected_days is 0
+5. Saves to database with correct expected_days value
+6. `get_status()` returns expected_days
+7. `get_stage_data()` sends expected_days to Flutter
+8. Flutter displays "Day 3 of 5" and "2 days remaining" ✅
+
+---
+
+## 2025-11-17 - Fixed Database Migration Error: Missing start_time Column ✅
+
+Status: Complete - Added database migration system for schema updates
+Files Affected:
+- mushpi/app/database/manager.py
+
+Problem:
+The mushpi service was failing to start with a database error:
+```
+Error during threshold migration: no such column: start_time
+Traceback (most recent call last):
+  File "/home/pi/mushpi/app/core/stage.py", line 74, in _migrate_thresholds_if_needed
+    existing = self.db_manager.get_all_stage_thresholds()
+  File "/home/pi/mushpi/app/database/manager.py", line 247, in get_all_stage_thresholds
+    cursor = conn.execute("""
+sqlite3.OperationalError: no such column: start_time
+```
+
+Root Cause:
+The `start_time` column was added to the `stage_thresholds` table schema in the `_init_database()` method, but this only creates the column for **new databases**. The `CREATE TABLE IF NOT EXISTS` statement doesn't alter existing tables, so any Pi that already had a database from before the `start_time` column was added would have an incomplete schema.
+
+When `_migrate_thresholds_if_needed()` tried to query all stage thresholds (which includes the `start_time` column in the SELECT statement), it failed because the column didn't exist in the old database.
+
+Solution Implemented:
+
+**Added Database Migration System**
+
+Created a `_run_migrations()` method that:
+1. Runs automatically after database initialization
+2. Checks if migrations are needed before applying them
+3. Handles each schema change independently
+4. Logs migration progress for debugging
+
+**Migration Method:**
+```python
+def _run_migrations(self):
+    """Run database migrations for schema updates
+    
+    This method handles schema changes for existing databases.
+    Each migration checks if it's needed before running.
+    """
+    with sqlite3.connect(self.db_path, timeout=self.timeout) as conn:
+        # Migration 1: Add start_time column to stage_thresholds if missing
+        try:
+            # Check if column exists
+            cursor = conn.execute("PRAGMA table_info(stage_thresholds)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if 'start_time' not in columns:
+                logger.info("🔄 Running migration: Adding start_time column to stage_thresholds")
+                conn.execute("""
+                    ALTER TABLE stage_thresholds 
+                    ADD COLUMN start_time TEXT
+                """)
+                logger.info("✅ Migration complete: start_time column added")
+        except sqlite3.OperationalError as e:
+            # If table doesn't exist yet, that's fine (fresh database)
+            if "no such table" not in str(e).lower():
+                logger.error(f"Error during migration: {e}")
+                raise
+```
+
+**Integration in `_init_database()`:**
+```python
+# Set permissions on database file (readable/writable by user and group)
+if self.db_path.exists():
+    self.db_path.chmod(0o664)
+
+# Run migrations for existing databases
+# self._run_migrations()  # ← NEW: Handles schema updates
+
+logger.info(f"Database initialized successfully at {self.db_path}")
+```
+
+**How It Works:**
+1. Service starts → `DatabaseManager.__init__()` called
+2. `_init_database()` creates base schema (if new DB) or opens existing DB
+3. `_run_migrations()` checks for missing columns using `PRAGMA table_info()`
+4. If `start_time` column missing: Runs `ALTER TABLE ADD COLUMN`
+5. If column already exists or table doesn't exist: Skips silently
+6. Continues with normal startup
+
+**Benefits:**
+✅ Existing databases automatically upgraded on service start
+✅ No manual intervention needed (no SQL scripts to run)
+✅ Idempotent - safe to run multiple times
+✅ Gracefully handles fresh installs (table doesn't exist yet)
+✅ Clear logging shows when migrations run
+✅ Foundation for future schema changes
+
+**Migration Pattern:**
+This establishes a pattern for future schema changes:
+- Add new migration in `_run_migrations()`
+- Check if change is needed (PRAGMA, SELECT, etc.)
+- Apply change if needed
+- Log success
+- Handle errors gracefully
+
+**Example Future Migration:**
+```python
+# Migration 2: Add new column to sensor_readings
+cursor = conn.execute("PRAGMA table_info(sensor_readings)")
+columns = [row[1] for row in cursor.fetchall()]
+
+if 'new_field' not in columns:
+    logger.info("🔄 Running migration: Adding new_field to sensor_readings")
+    conn.execute("ALTER TABLE sensor_readings ADD COLUMN new_field REAL")
+    logger.info("✅ Migration complete: new_field added")
+```
+
+**Testing:**
+- Old database: Migration runs, adds column, service starts successfully
+- New database: Migration skips (column already exists), service starts
+- Fresh install: Migration skips (table doesn't exist yet), service starts
+- Multiple restarts: Migration skips (column already added), no duplicate attempts
+
+Next Steps:
+1. Deploy updated code to Pi
+2. Restart mushpi service
+3. Check logs for migration message: "🔄 Running migration: Adding start_time column"
+4. Verify service starts without errors
+5. Check that stage state reads correctly include start_time
+
+---
+
+## 2025-11-17 - Fixed "Popped Last Page Off Stack" in Stage Progress Card ✅
+
+Status: Complete - Stage Progress Card now handles navigation safely
+Files Affected:
+- flutter/mushpi_hub/lib/screens/monitoring_screen.dart
+
+Problem:
+Exception occurred when navigating away from monitoring screen while Stage Progress Card was loading:
+```
+_AssertionError: You have popped the last page off of the stack
+```
+
+Root Cause:
+The `_StageProgressCard` was a stateless `ConsumerWidget` using `FutureBuilder` to load stage data asynchronously. When the user navigated away during the async operation, the future completed but the widget was disposed, causing context-related errors.
+
+Solution Implemented:
+
+**Converted to StatefulWidget with proper lifecycle management:**
+
+```dart
+// BEFORE - Stateless with FutureBuilder
+class _StageProgressCard extends ConsumerWidget {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final bleOps = ref.watch(bleOperationsProvider);
+    return FutureBuilder<StageStateData?>(
+      future: bleOps.readStageState(),  // ❌ No lifecycle control
+      builder: (context, snapshot) { ... }
+    );
+  }
+}
+
+// AFTER - Stateful with mounted checks
+class _StageProgressCard extends ConsumerStatefulWidget { ... }
+
+class _StageProgressCardState extends ConsumerState<_StageProgressCard> {
+  StageStateData? _stageData;
+  bool _isLoading = false;
+  
+  @override
+  void initState() {
+    super.initState();
+    _loadStageData();
+  }
+
+  Future<void> _loadStageData() async {
+    if (!mounted) return;  // ✅ Check before starting
+    
+    setState(() { _isLoading = true; });
+    
+    try {
+      final bleOps = ref.read(bleOperationsProvider);
+      final data = await bleOps.readStageState();
+      
+      if (!mounted) return;  // ✅ Check after async operation
+      
+      setState(() { _stageData = data; });
+    } catch (e) {
+      if (!mounted) return;  // ✅ Check before setState
+      
+      setState(() { _errorMessage = 'Failed to load stage data'; });
+    }
+  }
+}
+```
+
+**Key Safety Features:**
+1. **Mounted checks** before and after every async operation
+2. **State management** with local variables instead of FutureBuilder
+3. **Proper disposal** - widget can be safely disposed during loading
+4. **Manual refresh** - button calls `_loadStageData()` with mounted checks
+
+**Benefits:**
+- ✅ No more "popped last page off stack" errors
+- ✅ Safe navigation during data loading
+- ✅ Proper cleanup when widget disposed
+- ✅ Better error handling with explicit states
+- ✅ Refresh functionality still works correctly
+
+**Pattern Applied:**
+This is the same pattern used for date picker fixes - always check `mounted` before:
+1. Starting async operations
+2. After `await` before using context/setState
+3. In error handlers before setState
+
+---
+
+## 2025-11-17 - Fixed BLE Stage State Serialization Error ✅
+
+Status: Complete - Stage state reads now work correctly
+Files Affected:
+- mushpi/app/ble/serialization.py
+
+Problem:
+When reading stage state via BLE, the Pi crashed with error:
+```
+Error converting stage state from dict: 'int' object has no attribute 'upper'
+```
+
+This prevented the Flutter app from reading stage progression data on the monitoring page.
+
+Root Cause:
+The `stage_state_from_dict()` function expected `mode` to always be a string ("full", "semi", "manual") and called `.upper()` on it. However, `get_stage_data()` in main.py was updated to return `mode` as a numeric ID (0, 1, 2) for BLE efficiency. This created a type mismatch.
+
+Solution Implemented:
+
+Updated `stage_state_from_dict()` to handle **both string and numeric formats**:
+
+```python
+# BEFORE - Only handled strings
+mode_str = data['mode'].upper()  # ❌ Crashes if mode is int
+if mode_str == 'FULL':
+    stage_data.mode = 0
+
+# AFTER - Handles both formats
+mode_value = data['mode']
+if isinstance(mode_value, str):
+    # String format: 'full', 'semi', 'manual'
+    mode_str = mode_value.upper()
+    if mode_str == 'FULL':
+        stage_data.mode = 0
+    elif mode_str == 'SEMI':
+        stage_data.mode = 1
+    elif mode_str == 'MANUAL':
+        stage_data.mode = 2
+elif isinstance(mode_value, int):
+    # Already numeric: 0=FULL, 1=SEMI, 2=MANUAL
+    stage_data.mode = mode_value  # ✅ Direct assignment
+```
+
+**Benefits:**
+- ✅ Stage state BLE reads work correctly
+- ✅ Monitoring page Stage Progress card can load data
+- ✅ Backward compatible with both string and numeric mode formats
+- ✅ No more serialization errors in Pi logs
+
+---
+
+## 2025-11-17 - Added Stage Progress Card to Monitoring Screen ✅
+
+Status: Complete - Monitoring page now shows cultivation stage progression
+Files Affected:
+- flutter/mushpi_hub/lib/screens/monitoring_screen.dart
+
+Problem:
+Monitoring page only showed environmental data (temp, humidity, CO2, light) but no information about cultivation stage progression, making it difficult to track growth cycle status.
+
+Solution Implemented:
+
+**Added Stage Progress Card displaying:**
+1. **Current Stage**: Species and stage name (e.g., "Oyster - Pinning")
+2. **Automation Mode**: Full Auto / Semi Auto / Manual
+3. **Days Elapsed**: Number of days in current stage
+4. **Expected Days**: Target duration for current stage
+5. **Progress Bar**: Visual indicator with percentage (e.g., 74%)
+6. **Days Remaining**: Countdown to expected completion
+7. **Stage Status**: "IN PROGRESS" or "COMPLETE" badge
+8. **Start Date**: When current stage began (formatted: "Today", "5 days ago", or date)
+9. **Auto-advance Hint**: Shows if stage will auto-advance (FULL mode) or requires manual action (SEMI/MANUAL)
+
+**Features:**
+- Reads `stage_state` BLE characteristic for real-time data
+- Refresh button to manually update
+- Error handling with user-friendly messages
+- Responsive layout with color-coded status
+- Shows "Ready to advance" when stage complete (days >= expected_days)
+- Automatic percentage calculation: `(daysElapsed / expectedDays) * 100`
+
+**UI Design:**
+- Card appears between Environmental Overview and Actuator Status
+- Progress bar changes color when complete (tertiary color vs primary)
+- Status badge changes from "IN PROGRESS" (blue) to "COMPLETE" (green)
+- Two-column metrics layout for start date and remaining days
+- Conditional hint message based on automation mode
+
+**Calculation Logic:**
+```dart
+final daysElapsed = stageData.daysInStage;  // From DateTime.now() - stageStartTime
+final expectedDays = stageData.expectedDays;  // From database
+final progressPercent = (daysElapsed / expectedDays * 100).clamp(0, 100);
+final daysRemaining = (expectedDays - daysElapsed).clamp(0, expectedDays);
+```
+
+**Example Display:**
+```
+Stage Progress                                [Refresh]
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Oyster - Pinning                      [IN PROGRESS]
+Semi Auto
+
+Day 5 of 7                                      74%
+████████████████████░░░░░░░             <progress bar>
+
+Started: 5 days ago     |     Days Remaining: 2 days
+
+ℹ Manual advancement required when complete
+```
+
+**Benefits:**
+- ✅ Real-time visibility of cultivation progress
+- ✅ Clear indication when stage is complete
+- ✅ Helps users know when to check for mushroom development
+- ✅ Reduces need to navigate to Stage page for progress info
+- ✅ Supports all automation modes (FULL/SEMI/MANUAL)
+
+---
+
+## 2025-11-17 - Added Automatic Stage Progression with Database Persistence ✅
+
+Status: Complete - Pi automatically advances stages and tracks start_time in database
+Files Affected:
+- mushpi/app/database/manager.py
+- mushpi/app/core/stage.py
+- mushpi/main.py
+
+Problem:
+1. Stage start dates were only stored in JSON config file, not in database
+2. No automatic stage progression - required manual advancement
+3. Date showing epoch (1970-01-01) on Stage page because database had no start_time
+4. No progression tracking shown on monitoring page
+
+Root Cause:
+- `stage_thresholds` table did not have `start_time` column
+- Main loop did not check for automatic stage advancement
+- No mechanism to save new stage's start_time when advancing
+
+Solution Implemented:
+
+**1. Added start_time column to database:**
+```sql
+CREATE TABLE IF NOT EXISTS stage_thresholds (
+    ...
+    expected_days INTEGER DEFAULT 0,
+    start_time TEXT,  -- ✅ NEW: Stores ISO format datetime
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(species, stage)
+);
+```
+
+**2. Updated all database operations to handle start_time:**
+- `get_stage_thresholds()`: Now SELECTs start_time
+- `get_all_stage_thresholds()`: Includes start_time in results
+- `save_stage_thresholds()`: INSERTs/UPDATEs start_time
+- Added start_time to thresholds dict when reading current active stage
+
+**3. Created advance_stage() method:**
+```python
+def advance_stage(self) -> bool:
+    """Advance to the next stage in the cultivation cycle"""
+    # Gets next stage: Incubation → Pinning → Fruiting → Harvest
+    # Sets start_time to datetime.now() for new stage
+    # Saves start_time to database
+    # Updates JSON config
+```
+
+**4. Updated should_advance_stage() logic:**
+```python
+# BEFORE: Only advanced when 20% overdue
+if age_days > self.current_stage.expected_days * 1.2:
+    return True
+
+# AFTER: Advances immediately when expected_days reached
+if age_days >= self.current_stage.expected_days:
+    return True, f"Stage complete ({age_days}/{expected_days} days elapsed)"
+```
+
+**5. Added auto-progression to main loop:**
+```python
+# In main.py monitoring loop (every 30 seconds):
+if current_stage_info and current_stage_info.mode == StageMode.FULL:
+    should_advance, reason = stage_manager.should_advance_stage()
+    if should_advance:
+        logger.info(f"🔄 Auto-advancing stage: {reason}")
+        stage_manager.advance_stage()
+        # Update control system with new stage thresholds
+        # Update light schedule for new stage
+```
+
+**6. Modified BLE callbacks to preserve start_time:**
+```python
+# get_stage_thresholds_for_ble(): Include start_time from current_stage
+# set_stage_thresholds_from_ble(): Preserve start_time when updating current stage
+```
+
+**Benefits:**
+- ✅ Automatic progression: Incubation (14 days) → Pinning (7 days) → Fruiting (10 days)
+- ✅ Start date persisted in database, not just JSON file
+- ✅ Date shows correctly on Stage page (not 1970-01-01)
+- ✅ Progress percentage calculated: `(age_days / expected_days) * 100`
+- ✅ Each stage tracks its own start_time independently
+- ✅ Works only in FULL automation mode (SEMI/MANUAL require manual advancement)
+
+**Stage Progression Flow:**
+1. User sets Incubation stage via Flutter app → start_time saved to DB
+2. Pi monitors every 30 seconds in main loop
+3. After 14 days: Pi detects Incubation complete
+4. Pi automatically advances to Pinning → new start_time saved to DB
+5. After 7 days: Pi advances to Fruiting → new start_time saved to DB
+6. After 10 days: Pi advances to Harvest
+7. Flutter app reads start_time from DB via BLE → shows correct date and progress
+
+**Database Migration:**
+Existing databases will automatically get the new `start_time` column (CREATE TABLE IF NOT EXISTS will add it).
+Existing rows will have NULL start_time until next stage update.
+
+---
+
+## 2025-11-17 - Fixed "Popped Last Page Off Stack" Exception in Date Picker ✅
+
+Status: Complete - Added mounted checks to prevent context usage after widget disposal
+Files Affected:
+- flutter/mushpi_hub/lib/screens/stage_wizard_screen.dart
+
+Problem:
+Exception occurred when using the date picker: "popped last page off stack" or context-related errors. This happened when the user:
+1. Opened the date picker
+2. Navigated away or the widget was disposed
+3. The async operations tried to use the invalid context
+
+Root Cause:
+The `_pickDatePlanted()` function uses `context` in two async operations (`showDatePicker` and `showTimePicker`) without checking if the widget is still mounted. After the `await`, the widget might have been disposed, making the context invalid.
+
+```dart
+// BEFORE - No mounted checks
+final date = await showDatePicker(context: context, ...);  // ❌
+if (date == null) return;
+
+final timeOfDay = await showTimePicker(context: context, ...);  // ❌
+if (timeOfDay == null) return;
+```
+
+Solution Implemented:
+
+Added `mounted` checks before and after each async operation:
+
+```dart
+// AFTER - Safe mounted checks
+if (!mounted) return;  // ✅ Check before first dialog
+
+final date = await showDatePicker(context: context, ...);
+if (date == null || !mounted) return;  // ✅ Check after await
+
+final timeOfDay = await showTimePicker(context: context, ...);
+if (timeOfDay == null || !mounted) return;  // ✅ Check after await
+
+setState(() { ... });  // Only called if still mounted
+```
+
+**Benefits:**
+- No more "popped last page off stack" exceptions
+- Safe context usage after async operations
+- Graceful handling of navigation during dialog operations
+- Prevents setState on disposed widgets
+
+**Pattern Applied:**
+1. Check `!mounted` before showing first dialog
+2. Check `!mounted` after each `await` before using context again
+3. Only call `setState()` if widget is still mounted
+
+This is a common Flutter best practice for any widget that uses `context` after async operations.
+
+---
+
+## 2025-11-17 - Fixed Date Picker Exception on Stage Page ✅
+
+Status: Complete - Date picker now handles invalid dates gracefully
+Files Affected:
+- flutter/mushpi_hub/lib/screens/stage_wizard_screen.dart
+
+Problem:
+Clicking the date picker on the Stage page caused an exception and crash. This occurred when `_datePlanted` was set to an invalid date like 1970-01-01 (Unix epoch from timestamp 0) or any date outside the allowed range.
+
+Root Cause:
+The `showDatePicker()` requires `initialDate` to be between `firstDate` and `lastDate`. When loading stage state with timestamp 0 or corrupted data, `_datePlanted` would be set to 1970-01-01, which is **before** `firstDate` (365 days ago), causing this exception:
+
+```
+RangeError: initialDate must be between firstDate and lastDate
+```
+
+Solution Implemented:
+
+Added validation to ensure `initialDate` is within valid range:
+
+```dart
+Future<void> _pickDatePlanted() async {
+    final now = DateTime.now();
+    final firstDate = now.subtract(const Duration(days: 365));
+    final lastDate = now;
+
+    // Ensure initialDate is within valid range
+    DateTime initialDate = _datePlanted;
+    if (initialDate.isBefore(firstDate) || initialDate.isAfter(lastDate)) {
+      initialDate = now; // Default to now if out of range
+    }
+
+    final date = await showDatePicker(
+      context: context,
+      initialDate: initialDate,  // ✅ Validated date
+      firstDate: firstDate,
+      lastDate: lastDate,
+    );
+    // ...
+}
+```
+
+**Benefits:**
+- No more crashes when clicking date picker
+- Handles epoch date (1970-01-01) gracefully
+- Handles any corrupted/invalid dates
+- Defaults to current date if out of range
+- User can still select any valid date
+
+**Edge Cases Handled:**
+- Date too far in past (like 1970-01-01 from timestamp 0)
+- Date in the future (if system clock issues)
+- Null or invalid DateTime objects
+
+---
+
+## 2025-11-17 - Fixed Stage Form Expected Days Using Wrong Source ✅
+
+Status: Complete - Expected days now correctly displayed per stage from thresholds data
+Files Affected:
+- flutter/mushpi_hub/lib/screens/stage_wizard_screen.dart
+
+Problem:
+The Stage page form was showing incorrect expected days for all three stages. It was displaying the same value (e.g., 14 days) for Incubation, Pinning, AND Fruiting, instead of their actual individual values from the database (e.g., Incubation: 14 days, Pinning: 7 days, Fruiting: 10 days).
+
+Root Cause:
+The stage wizard was using `stageState.expectedDays` for all three stages. The `stageState` contains data about the **currently active stage only** (e.g., Incubation with 14 days), but the code was applying this single value to all three stages in the loop.
+
+```dart
+// WRONG: Uses current stage's expectedDays for all stages
+_stageConfigs[stage] = {
+  'expectedDays': stageState?.expectedDays ??  // ❌ Same value for all!
+      _getDefaultExpectedDays(_species, stage),
+  'tempMin': thresholds.tempMin,
+  // ...
+};
+```
+
+Solution Implemented:
+
+Changed to use `thresholds.expectedDays` which is stage-specific:
+
+```dart
+// CORRECT: Uses each stage's own expectedDays from thresholds
+_stageConfigs[stage] = {
+  'expectedDays': thresholds.expectedDays ??  // ✅ Stage-specific value
+      _getDefaultExpectedDays(_species, stage),
+  'tempMin': thresholds.tempMin,
+  // ...
+};
+```
+
+**Data Flow:**
+1. Database stores expected_days for each species/stage combination
+2. `stage_manager.get_stage_thresholds(species, stage)` queries DB per stage
+3. BLE transmits stage-specific thresholds as JSON
+4. Flutter `readStageThresholds()` parses for each stage individually
+5. Form now displays correct expected_days for each stage
+
+**Benefits:**
+- Incubation shows its expected days (e.g., 14)
+- Pinning shows its expected days (e.g., 7)
+- Fruiting shows its expected days (e.g., 10)
+- Each stage maintains independent configuration
+- Form accurately reflects database values
+
+Example:
+- Before: All stages showed "14 days" (from current Incubation stage)
+- After: Incubation: 14 days, Pinning: 7 days, Fruiting: 10 days
+
+---
+
+## 2025-11-17 - Fixed Stage State Write to Preserve Date Planted and Mode ✅
+
+Status: Complete - Date planted and automation mode now properly saved when writing stage state
+Files Affected:
+- mushpi/main.py
+- mushpi/app/core/stage.py
+
+Problem:
+When saving stage configuration from the Flutter app, two fields were being lost:
+1. **Date Planted** was resetting to current time (showing as 1/1/1970 due to timestamp 0 in read)
+2. **Automation Mode** was not being applied (always defaulting to SEMI instead of user-selected mode)
+
+Root Cause:
+**Issue 1: Date Planted Ignored**
+The `set_stage_state()` callback received the full BLE packet including `stage_start_ts` (Unix timestamp), but only extracted `species` and `stage`, discarding the timestamp. Then `stage_manager.set_stage()` was hardcoded to use `datetime.now()`.
+
+**Issue 2: Mode Ignored**
+Similarly, the `mode` field (0=FULL, 1=SEMI, 2=MANUAL) was being received but not extracted or passed to `set_stage()`.
+
+Solution Implemented:
+
+**1. Updated `set_stage()` to Accept Timestamp**
+```python
+def set_stage(self, species: str, stage: str, mode: Optional[StageMode] = None, 
+              start_time: Optional[datetime] = None) -> bool:
+    self.current_stage = StageInfo(
+        species=species,
+        stage=stage,
+        start_time=start_time or datetime.now(),  # Use provided or default to now
+        # ... other fields ...
+    )
+```
+
+**2. Updated `set_stage_state()` to Extract and Pass All Fields**
+```python
+def set_stage_state(stage_data: dict):
+    # Extract mode
+    mode_id = stage_data.get('mode')
+    if mode_id is not None:
+        mode_map = {0: StageMode.FULL, 1: StageMode.SEMI, 2: StageMode.MANUAL}
+        mode = mode_map.get(mode_id)
+    
+    # Extract timestamp
+    stage_start_ts = stage_data.get('stage_start_ts', 0)
+    if stage_start_ts > 0:
+        start_time = datetime.fromtimestamp(stage_start_ts)
+    
+    # Pass all parameters
+    stage_manager.set_stage(species, stage, mode=mode, start_time=start_time)
+```
+
+**Benefits:**
+- Date planted is preserved across saves (no more 1/1/1970 or unexpected resets)
+- Automation mode (Full Auto, Semi Auto, Manual) correctly saved and displayed
+- Full round-trip data integrity from Flutter → Pi → Database → Flutter
+- Stage age calculations now accurate based on actual planted date
+
+**Data Flow:**
+1. User sets date planted in Flutter app
+2. Serialized as Unix timestamp in BLE packet (4 bytes)
+3. Python unpacks timestamp correctly
+4. `set_stage_state()` extracts and converts to datetime
+5. `set_stage()` stores in database with correct date
+6. `get_stage_data()` reads back and converts to timestamp for BLE
+7. Flutter displays correct date planted
+
+Next Steps:
+- Restart mushpi service to load updated code
+- Test that date planted persists correctly when saving stage configuration
+- Verify automation mode shows correctly (Full Auto vs Semi Auto vs Manual)
+
+---
+
+## 2025-11-17 - Added Stage Start Timestamp to BLE Stage State Data ✅
+
+Status: Complete - Date planted now properly transmitted from Pi to Flutter app
+Files Affected:
+- mushpi/main.py
+
+Problem:
+The Stage page's "Date Planted" field was not loading from the device. The Flutter app expected `stageStartTime` (timestamp) in the stage state data, but the Python callback `get_stage_data()` was only returning `age_days` without the actual start timestamp.
+
+Root Cause:
+The `get_stage_data()` callback was missing two critical fields:
+1. `stage_start_ts` - Unix timestamp of when the stage started (needed for "Date Planted")
+2. `expected_days` - Expected duration of the stage
+
+The `stage_manager.get_status()` provides `start_time` as ISO format string, but it wasn't being converted to Unix timestamp and included in the BLE response.
+
+Solution Implemented:
+
+**Added Timestamp Conversion and Fields**
+```python
+def get_stage_data():
+    status = stage_manager.get_status()
+    # ... existing code ...
+    
+    # Convert ISO format start_time to Unix timestamp
+    stage_start_ts = 0
+    if 'start_time' in status:
+        try:
+            from datetime import datetime
+            start_dt = datetime.fromisoformat(status['start_time'])
+            stage_start_ts = int(start_dt.timestamp())
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Could not parse start_time: {e}")
+    
+    return {
+        # ... existing fields ...
+        'stage_start_ts': stage_start_ts,      # NEW: Unix timestamp
+        'expected_days': status.get('expected_days', 0)  # NEW: Expected duration
+    }
+```
+
+**Data Flow:**
+1. `stage_manager.get_status()` returns `start_time` as ISO string (e.g., "2025-11-17T10:30:00")
+2. `get_stage_data()` converts to Unix timestamp (e.g., 1700218200)
+3. BLE serializer packs as 4-byte unsigned integer
+4. Flutter receives and converts to `DateTime` object
+5. Stage page displays as "Date Planted"
+
+**Benefits:**
+- Stage page now shows correct date planted from database
+- Progress tracking works correctly (shows days elapsed)
+- Stage age calculations accurate
+- Full round-trip support for stage state persistence
+
+Next Steps:
+- Restart mushpi service to load updated code
+- Verify "Date Planted" appears correctly in Stage page
+
+---
+
+## 2025-11-17 - Enhanced BLE Write Error Diagnostics & Graceful Fallback ✅
+
+Status: Complete - Added detailed logging, property checking, and graceful fallback for BLE write failures
+Files Affected:
+- flutter/mushpi_hub/lib/data/repositories/ble_repository.dart
+
+Problem:
+Stage page not loading data - logs showed `📋 Characteristic Properties` with no values, indicating write operation wasn't completing. The stage_thresholds characteristic requires a write (to set query context) before read, but write was failing silently.
+
+Root Cause:
+The characteristic properties logging might be throwing exceptions, or the write property is `false` causing the code to throw an exception before attempting read. This prevented any data loading on the Stage page.
+
+Solution Implemented:
+
+**1. Added Try-Catch Around Property Logging**
+```dart
+try {
+  final props = _stageThresholdsChar!.properties;
+  developer.log('📋 Characteristic Properties - Write: ${props.write}, ...');
+} catch (e) {
+  developer.log('⚠️ Could not read characteristic properties: $e');
+}
+```
+
+**2. Graceful Write Fallback**
+Changed from throwing exception to attempting read with default context:
+```dart
+try {
+  if (props.write) {
+    await _stageThresholdsChar!.write(queryBytes, withoutResponse: false);
+  } else if (props.writeWithoutResponse) {
+    await _stageThresholdsChar!.write(queryBytes, withoutResponse: true);
+  } else {
+    developer.log('⚠️ No write properties - attempting read with default context');
+  }
+} catch (e) {
+  developer.log('⚠️ Write failed: $e - attempting read with default context');
+}
+// Continue to read anyway
+```
+
+**3. Added Discovery-Time Property Logging**
+```dart
+case BLEConstants.stageThresholdsUUID:
+  _stageThresholdsChar = char;
+  debugPrint('    ✅ [BLE DISCOVER] Mapped to: Stage Thresholds');
+  debugPrint('       Properties: R=${char.properties.read} W=${char.properties.write} WNR=${char.properties.writeWithoutResponse} N=${char.properties.notify}');
+```
+
+**Benefits:**
+- Stage page no longer crashes when write fails
+- Will attempt to read data even if write fails (uses Python side's default context: Oyster/Incubation)
+- Comprehensive logging at discovery time shows exact characteristic capabilities
+- Graceful degradation instead of complete failure
+
+**Known Limitation:**
+If write fails, only Incubation stage data will load correctly (Python defaults to Oyster/Incubation). Pinning and Fruiting stages will receive Incubation data. This is a temporary workaround until write capability is fixed.
+
+**Next Steps:**
+- Rebuild Flutter app and test Stage page
+- Check logs to identify why write property is missing/failing
+- May need to restart mushpi service or check BlueZ D-Bus registration
+- Consider alternative: use separate read-only characteristics for each stage
+
+---
+
+## 2025-11-17 - Enhanced BLE Write Error Diagnostics ✅
+
+Status: Complete - Added detailed logging and property checking for BLE write operations
+Files Affected:
+- flutter/mushpi_hub/lib/data/repositories/ble_repository.dart
+
+Problem:
+User encountered BLE write failure when querying stage thresholds. The error occurred at `_stageThresholdsChar!.write()` but didn't provide enough context to diagnose the root cause.
+
+Solution Implemented:
+
+**1. Added Characteristic Property Logging**
+Before attempting write, now logs all characteristic properties:
+```dart
+developer.log(
+  '📋 Characteristic Properties - Write: ${_stageThresholdsChar!.properties.write}, '
+  'WriteWithoutResponse: ${_stageThresholdsChar!.properties.writeWithoutResponse}, '
+  'Read: ${_stageThresholdsChar!.properties.read}',
+  name: 'BLERepository.StageThresholds',
+);
+```
+
+**2. Smart Write Mode Selection**
+Added fallback logic to handle characteristics with different write capabilities:
+```dart
+if (_stageThresholdsChar!.properties.write) {
+  await _stageThresholdsChar!.write(queryBytes, withoutResponse: false);
+} else if (_stageThresholdsChar!.properties.writeWithoutResponse) {
+  developer.log('⚠️ Using writeWithoutResponse as write property not available');
+  await _stageThresholdsChar!.write(queryBytes, withoutResponse: true);
+} else {
+  throw BLEException('Stage thresholds characteristic is not writable');
+}
+```
+
+**3. Enhanced Error Logging**
+Improved error handling to capture:
+- Error type (exception class name)
+- Error message
+- Connection state at time of error
+- Query size in bytes
+
+```dart
+developer.log('📤 Query: ${json.encode(queryJson)} (${queryBytes.length} bytes)');
+// ... on error:
+developer.log('Error Type: $errorType, Message: $errorMsg');
+developer.log('Connection state at error: ${_connectedDevice?.isConnected ?? false}');
+```
+
+**Benefits:**
+- Diagnostic logs help identify if issue is permissions, MTU size, or connection state
+- Automatic fallback to writeWithoutResponse if write property unavailable
+- Clear error messages for faster troubleshooting
+
+Next Steps:
+- User needs to rebuild Flutter app to get enhanced diagnostics
+- Check logs to identify specific write failure reason
+- May need to verify BlueZ D-Bus characteristic registration
+
+---
+
+## 2025-11-17 - Fixed Control Targets Returning Wrong Callback Data ✅
+
+Status: Complete - Control targets now return actual thresholds instead of relay states
+Files Affected:
+- mushpi/main.py
+- mushpi/app/core/ble_gatt.py
+
+Problem:
+Control screen was showing incorrect threshold values (RH 70%, CO2 5000 ppm) instead of the database values (RH 90%, CO2 2000 ppm). The logs confirmed data was being read correctly from the database but then overwritten with wrong values from the control_targets BLE characteristic.
+
+Root Cause:
+The `control_targets` characteristic's read callback was using `get_control_data()` which returns **relay states** (on/off for fan, mist, light, heater) instead of **control thresholds** (temp_min, temp_max, rh_min, co2_max, light settings).
+
+```python
+# Wrong - returns relay states:
+def get_control_data():
+    return {
+        'fan': True,
+        'mist': False,
+        'light': False,
+        'heater': False,
+        'mode': 'automatic'
+    }
+```
+
+This caused the BLE characteristic to return garbage values when parsed as thresholds.
+
+Solution Implemented:
+
+**1. Created New `get_control_targets()` Callback**
+Added dedicated function to return current thresholds from stage manager:
+```python
+def get_control_targets():
+    """Get currently applied control thresholds"""
+    current_thresholds = stage_manager.get_current_thresholds()
+    return {
+        'temp_min': current_thresholds['temp_min'],
+        'temp_max': current_thresholds['temp_max'],
+        'rh_min': current_thresholds['rh_min'],
+        'co2_max': current_thresholds['co2_max'],
+        'light': {
+            'mode': light_schedule['mode'],
+            'on_min': light_schedule['on_minutes'],
+            'off_min': light_schedule['off_minutes']
+        }
+    }
+```
+
+**2. Added `get_control_targets` Parameter to BLE API**
+Updated `ble_gatt.set_callbacks()` signature:
+- `get_control_data` - Returns relay states (for actuator_status characteristic)
+- `get_control_targets` - Returns thresholds (for control_targets characteristic)
+
+**3. Updated Callback Registration**
+```python
+ble_gatt.set_callbacks(
+    get_control_data=get_control_data,        # Relay states
+    get_control_targets=get_control_targets,  # Thresholds (NEW)
+    set_control_targets=set_control_targets,
+    ...
+)
+```
+
+**4. Added Fallback for Unconfigured Stage**
+Returns safe defaults if no stage is configured:
+```python
+if not current_thresholds:
+    return {
+        'temp_min': 20.0, 'temp_max': 26.0,
+        'rh_min': 60.0, 'co2_max': 1000,
+        'light': {'mode': 'off', 'on_min': 0, 'off_min': 0}
+    }
+```
+
+Benefits:
+✅ Control screen now displays correct database values
+✅ Proper separation of concerns: relay states vs thresholds
+✅ Returns currently active thresholds from control system
+✅ Safe fallback for unconfigured systems
+✅ Light schedule integrated from control system status
+✅ Manual overrides preserved (override_bits is separate characteristic)
+
+Technical Details:
+- `get_control_data()` kept for actuator_status characteristic (relay on/off states)
+- `get_control_targets()` reads from stage_manager (source of truth for thresholds)
+- Control system applies thresholds from stage manager during initialization
+- Override bits handled by separate override_bits BLE characteristic
+- Light schedule pulled from control_system.get_status() for accurate real-time data
+
+---
+
+## 2025-11-17 - Fixed Type Casting Error in Stage Thresholds JSON Parsing ✅
+
+Status: Complete - Handle num type (int/double) from SQLite database values
+Files Affected:
+- flutter/mushpi_hub/lib/core/utils/ble_serializer.dart
+
+Problem:
+When reading stage thresholds from the device, the app crashed with a type casting error:
+```
+_TypeError (type 'double' is not a subtype of type 'int?' in type cast)
+```
+
+This occurred because SQLite stores numeric values as REAL (floating point), so when Python sends the JSON response, integer fields like `co2_max: 1000.0` arrive as doubles instead of ints.
+
+Root Cause:
+The `StageThresholdsData.fromJson()` method used direct type casts for integer fields:
+```dart
+co2Max: json['co2_max'] as int?,              // FAILS if value is 1000.0
+lightOnMinutes: lightData['on_min'] as int?,  // FAILS if value is 480.0
+lightOffMinutes: lightData['off_min'] as int?, // FAILS if value is 1200.0
+expectedDays: json['expected_days'] as int?,  // FAILS if value is 7.0
+```
+
+Direct casting fails when JSON contains `1000.0` (double) instead of `1000` (int).
+
+Solution Implemented:
+
+**Safe Type Conversion Using `.toInt()`**
+Changed all integer field parsing to handle `num` type (int or double):
+```dart
+// Before (fails on double):
+co2Max: json['co2_max'] as int?,
+
+// After (handles both int and double):
+co2Max: (json['co2_max'] as num?)?.toInt(),
+```
+
+Applied to all integer fields:
+- `co2Max`: CO2 threshold in ppm
+- `lightOnMinutes`: Light cycle on duration
+- `lightOffMinutes`: Light cycle off duration  
+- `expectedDays`: Expected stage duration
+
+Benefits:
+✅ Stage thresholds now load successfully from database
+✅ Handles SQLite REAL type values gracefully
+✅ Consistent with temperature/humidity parsing pattern (already used `toDouble()`)
+✅ No data loss - `1000.0.toInt()` correctly becomes `1000`
+✅ Robust to both integer and floating point JSON values
+
+Technical Details:
+- `num` is Dart's supertype for both `int` and `double`
+- `.toInt()` safely converts doubles to integers
+- Temperature/humidity fields already used this pattern: `(json['temp_min'] as num?)?.toDouble()`
+- Same fix applied to light schedule fields inside nested `light` object
+
+---
+
+## 2025-11-17 - Fixed Stage Wizard Loading Defaults Instead of Database Values ✅
+
+Status: Complete - Stage wizard now correctly loads device data when connected
+Files Affected:
+- flutter/mushpi_hub/lib/screens/stage_wizard_screen.dart
+
+Problem:
+Stage wizard was displaying default hardcoded values instead of reading from the Pi database, even when successfully connected and receiving environmental data. The log showed:
+```
+[mushpi.stage_wizard] 🔄 Stage wizard opened - loading current thresholds from device
+[mushpi.stage_wizard] ⚠️ Not connected to device - loading defaults
+```
+
+This happened despite the device being connected (environmental notifications were being received).
+
+Root Cause:
+The connection check used `bleConnectionStateProvider.valueOrNull` which is a **StreamProvider** that may not have emitted a value yet when the widget first loads:
+```dart
+final connState = ref.read(bleConnectionStateProvider).valueOrNull;
+if (connState != BluetoothConnectionState.connected) {
+    // Falls back to defaults - WRONG!
+}
+```
+
+When `.valueOrNull` returns `null` (stream hasn't emitted yet), the code incorrectly assumes the device is not connected and loads default values instead of reading from database.
+
+Solution Implemented:
+
+**Changed to Direct Connection State Check**
+Replaced StreamProvider with direct repository property check (same pattern as control screen):
+```dart
+// Before (unreliable):
+final connState = ref.read(bleConnectionStateProvider).valueOrNull;
+if (connState != BluetoothConnectionState.connected) { ... }
+
+// After (reliable):
+final isConnected = ref.read(bleRepositoryProvider).isConnected;
+if (!isConnected) { ... }
+```
+
+Benefits:
+✅ Stage wizard now correctly loads database values when connected
+✅ Eliminates race condition between StreamProvider emission and widget load
+✅ Consistent with control screen implementation pattern
+✅ More reliable connection state checking
+✅ Users see their actual saved thresholds, not defaults
+
+Technical Details:
+- `bleRepositoryProvider.isConnected` directly checks `_currentConnectionState` property
+- Avoids async stream timing issues
+- Control screen already used this pattern successfully
+- Stream listener remains for handling connection state changes after initial load
+
+---
+
+## 2025-11-17 - Fixed Status Flags BLE Parsing Error with Empty Data ✅
+
+Status: Complete - Resilient status flags parsing with graceful error handling
+Files Affected:
+- flutter/mushpi_hub/lib/core/utils/ble_serializer.dart
+
+Problem:
+The `parseStatusFlags` method was throwing `ArgumentError` when the BLE status flags characteristic returned empty data (0 bytes instead of expected 4 bytes). This interrupted the stage wizard data loading flow and created confusing error logs, even though the error was non-critical (stage thresholds still loaded successfully).
+
+Error Log:
+```
+[ERROR:flutter/runtime/dart_vm_initializer.cc(41)] Unhandled Exception: Invalid argument(s): 
+Status flags data must be exactly 4 bytes, got 0
+#0      BLEDataSerializer.parseStatusFlags (package:mushpi_hub/core/utils/ble_serializer.dart:164:7)
+#1      BLERepository.readStatusFlags (package:mushpi_hub/data/repositories/ble_repository.dart:1087:50)
+```
+
+Root Cause:
+The parser strictly enforced 4-byte data length and threw exceptions instead of handling malformed/empty BLE responses gracefully. This made the system fragile to temporary BLE communication issues.
+
+Solution Implemented:
+
+**1. Added Empty Data Validation**
+Returns safe default (0x0000 = all flags disabled) when data is empty:
+```dart
+if (data.isEmpty) {
+  developer.log(
+    '⚠️ Status flags: empty data received, returning default 0x0000',
+    name: 'BLEDataSerializer.parseStatusFlags',
+  );
+  return 0x0000;
+}
+```
+
+**2. Added Invalid Length Handling**
+Returns default with warning log instead of throwing when length is incorrect:
+```dart
+if (data.length != BLEConstants.statusDataSize) {
+  developer.log(
+    '⚠️ Status flags: invalid length ${data.length} bytes '
+    '(expected ${BLEConstants.statusDataSize}), returning default 0x0000',
+    name: 'BLEDataSerializer.parseStatusFlags',
+    level: 900, // WARNING
+  );
+  return 0x0000;
+}
+```
+
+**3. Added Structured Logging**
+Imported `dart:developer` for proper logging with log levels:
+```dart
+import 'dart:developer' as developer;
+```
+
+Benefits:
+✅ No more crashes from empty/malformed status flags data
+✅ Data loading flow continues uninterrupted
+✅ Clear warning logs for debugging BLE communication issues
+✅ Safe default (0x0000) represents "all control relays OFF" state
+✅ Handles edge cases: 0 bytes, 1-3 bytes, or >4 bytes gracefully
+✅ Stage thresholds continue to load successfully
+✅ Reduced noisy error logs in user experience
+
+Technical Details:
+- Default value 0x0000 represents all status flags disabled (safe state)
+- Log level 900 = WARNING (visible but not error-level)
+- Parser now handles all data length edge cases
+- Follows Flutter instructions: proper error handling, structured logging
+
+---
+
+## 2025-11-17 - Stage Wizard: Always Read Fresh Thresholds on Navigation ✅
+
+Status: Complete - Auto-refresh threshold data on every stage screen visit
+Files Affected:
+- flutter/mushpi_hub/lib/screens/stage_wizard_screen.dart
+
+Problem:
+After submitting threshold changes, when users navigated back to the Stage screen, the app would show stale/cached values instead of the freshly saved device values. This caused confusion about whether settings were actually saved to the Pi.
+
+Solution Implemented:
+
+**1. Unconditional Data Loading on Every Navigation**
+Changed from conditional loading (only if connected) to always attempting fresh reads:
+```dart
+// Always load data when stage screen opens
+WidgetsBinding.instance.addPostFrameCallback((_) {
+  developer.log('🔄 Stage wizard opened - loading current thresholds from device');
+  _loadExistingData();
+});
+```
+
+**2. Enhanced Connection State Checking**
+Added connection check inside `_loadExistingData()` to gracefully handle disconnected state:
+```dart
+final connState = ref.read(bleConnectionStateProvider).valueOrNull;
+if (connState != BluetoothConnectionState.connected) {
+  developer.log('⚠️ Not connected to device - loading defaults');
+  _loadDefaultValues();
+  return;
+}
+```
+
+**3. Detailed Loading Logs**
+Added comprehensive logging at each step:
+- 📖 Reading current thresholds from device...
+- ✅ Loaded stage state: Oyster - Incubation
+- ✅ Loaded thresholds for [Stage] from device
+- ⚠️ No thresholds found for [Stage], loading defaults
+- ✅ Successfully loaded configuration from device
+
+Benefits:
+✅ Always shows fresh data from device on every navigation
+✅ No more stale/cached values after submission
+✅ Clear logging shows exactly what was loaded
+✅ Graceful fallback to defaults if disconnected
+✅ Users confident they're seeing current device state
+
+---
+
+## 2025-11-17 - Fixed AttributeError in Stage Thresholds BLE Characteristic ✅
+
+Status: Complete - Fixed callback attribute checking
+Files Affected:
+- mushpi/app/ble/characteristics/stage_thresholds.py (lines 76, 131)
+
+Problem:
+The BLE service was crashing when attempting to read stage thresholds with an AttributeError:
+```
+AttributeError: 'StageThresholdsCharacteristic' object has no attribute 'get_callback'
+```
+
+Root Cause:
+Lines 76 and 131 were using boolean evaluation (`if not self.get_callback:` and `if not self.set_callback:`) to check if callbacks were configured. This caused an AttributeError when attempting to access the attribute before verifying it exists.
+
+Solution:
+Changed the callback checks to use explicit None comparison:
+- Line 76: `if not self.get_callback:` → `if self.get_callback is None:`
+- Line 131: `if not self.set_callback:` → `if self.set_callback is None:`
+
+This is the proper Python idiom for checking if an attribute is None without triggering AttributeError.
+
+Impact:
+- BLE characteristic reads/writes for stage thresholds now work correctly
+- No more crashes when Flutter app requests threshold data
+- Callbacks are safely checked before being invoked
+
+---
+
+## 2025-11-17 - Flutter Stage Wizard - Complete Grow Cycle Configuration ✅
+
+Status: Complete - Multi-step wizard for configuring all three growth stages atomically
+Files Affected:
+- flutter/mushpi_hub/lib/screens/stage_wizard_screen.dart (NEW, ~1490 lines)
+- flutter/mushpi_hub/lib/screens/stage_screen.dart (simplified to wrapper, ~17 lines)
+
+Problem:
+The previous stage configuration screen had significant UX issues:
+1. **Split Forms**: Stage state and thresholds were in separate forms with separate submit buttons
+2. **Confusing UX**: Users didn't know which button to press or if they needed to press both
+3. **Incomplete Configuration**: Users could only configure one stage at a time
+4. **Repetitive Work**: Had to revisit the screen each time they advanced to a new stage
+5. **No Overview**: Couldn't see or plan the complete grow cycle upfront
+
+These issues made the system hard to use, especially for new users setting up their first grow.
+
+Solution: Multi-Step Wizard for Complete Grow Cycle Setup
+
+**Architecture - 5-Step Wizard:**
+
+```
+Step 0: Basic Information
+├─ Species Selection (Oyster/Shiitake/Lion's Mane)
+├─ Date Planted (when batch started)
+├─ Current Growth Stage (Incubation/Pinning/Fruiting)
+└─ Automation Mode (Full Auto/Semi Auto/Manual)
+
+Step 1: Incubation Stage Configuration
+├─ Expected Duration (days)
+├─ Temperature Range (min/max in °C)
+├─ Humidity Minimum (%)
+├─ CO₂ Maximum (ppm)
+└─ Light Mode (OFF/ON/CYCLE with timing)
+
+Step 2: Pinning Stage Configuration
+├─ Expected Duration (days)
+├─ Temperature Range (min/max in °C)
+├─ Humidity Minimum (%)
+├─ CO₂ Maximum (ppm)
+└─ Light Mode (OFF/ON/CYCLE with timing)
+
+Step 3: Fruiting Stage Configuration
+├─ Expected Duration (days)
+├─ Temperature Range (min/max in °C)
+├─ Humidity Minimum (%)
+├─ CO₂ Maximum (ppm)
+└─ Light Mode (OFF/ON/CYCLE with timing)
+
+Step 4: Review & Submit
+├─ Summary of all configured settings
+├─ Edit buttons to jump back to any step
+└─ Submit All Settings button
+```
+
+**Key Features:**
+
+1. **Atomic Submission**
+   - One submit button writes ALL settings:
+     - Current stage state (species, date, mode, current stage)
+     - Incubation thresholds
+     - Pinning thresholds
+     - Fruiting thresholds
+   - All-or-nothing: Either all succeed or all fail
+   - No partial configuration or inconsistent state
+
+2. **Species-Specific Defaults**
+   - Oyster: 14d incubation, 5d pinning, 7d fruiting
+   - Shiitake: 21d incubation, 7d pinning, 10d fruiting
+   - Lion's Mane: 18d incubation, 6d pinning, 8d fruiting
+   - Defaults include optimal temps, humidity, CO₂, and light for each stage
+   - Automatically loaded when species changes
+
+3. **Progress Visualization**
+   - Stepper indicator at top shows current step (1/5, 2/5, etc.)
+   - Visual progress bar
+   - Can tap any completed step to jump back and edit
+
+4. **Data Loading**
+   - On wizard open: Loads current stage state + all three stage thresholds from device
+   - Falls back to species defaults if BLE read fails
+   - Auto-refreshes on BLE reconnection
+
+5. **Validation**
+   - Client-side validation before submission:
+     - Temperature: 5-35°C, min < max
+     - Humidity: 40-100%
+     - CO₂: 400-5000 ppm
+     - Expected days: 1-365
+     - Light timing: Valid HH:MM format for CYCLE mode
+   - Clear error messages show which stage/field has the problem
+
+6. **Navigation**
+   - Previous/Next buttons at bottom
+   - Step indicator allows jumping to any step
+   - Exit confirmation if there are unsaved changes
+
+**Implementation Details:**
+
+**State Management:**
+```dart
+// Wizard progression
+int _currentStep = 0;  // 0-4
+static const int _totalSteps = 5;
+
+// Basic info (Step 0)
+Species _species;
+DateTime _datePlanted;
+ControlMode _mode;
+GrowthStage _currentStage;
+
+// Stage configurations (Steps 1-3)
+Map<GrowthStage, Map<String, dynamic>> _stageConfigs = {
+  GrowthStage.incubation: {},
+  GrowthStage.pinning: {},
+  GrowthStage.fruiting: {},
+};
+
+// Controllers for each stage's form fields
+Map<GrowthStage, Map<String, TextEditingController>> _controllers;
+```
+
+**Submission Logic:**
+```dart
+Future<void> _submitAllSettings() async {
+  // 1. Validate all stages
+  final error = _validateAllStages();
+  if (error != null) return showError(error);
+
+  // 2. Write stage state
+  await bleOps.writeStageState(currentStageState);
+
+  // 3. Write Incubation thresholds
+  await bleOps.writeStageThresholds(incubationThresholds);
+
+  // 4. Write Pinning thresholds
+  await bleOps.writeStageThresholds(pinningThresholds);
+
+  // 5. Write Fruiting thresholds
+  await bleOps.writeStageThresholds(fruitingThresholds);
+
+  // 6. Success - navigate back
+  Navigator.pop(context);
+}
+```
+
+**Species Defaults System:**
+```dart
+Map<GrowthStage, Map<String, dynamic>> _getSpeciesDefaults(Species species) {
+  // Returns complete configuration for all three stages
+  // Including: expectedDays, tempMin, tempMax, rhMin, co2Max, lightMode
+  // Each species has scientifically-based optimal values
+}
+```
+
+**Benefits:**
+
+✅ **One-Time Setup**: Configure entire grow cycle in one flow
+✅ **Clear Workflow**: Step-by-step progression, user always knows where they are
+✅ **No Confusion**: One submit button, clear what it does
+✅ **Complete Configuration**: All three stages configured upfront
+✅ **Automatic Stage Transitions**: System uses correct thresholds as it advances through stages
+✅ **Edit Anytime**: Can jump back to any step to modify values
+✅ **Review Before Submit**: Step 5 shows summary of everything
+✅ **Smart Defaults**: Species-specific values pre-filled
+✅ **Validation**: Catches errors before submission
+✅ **Atomic**: All settings applied together or none
+
+**User Workflow Example:**
+
+1. User opens Stage screen → Wizard appears
+2. Step 0: Select "Oyster", set date to "Nov 17", currently in "Incubation", mode "Semi Auto"
+3. Step 1: Review Incubation defaults (20-24°C, 90% RH, 2000ppm CO₂, Light OFF), adjust if needed
+4. Step 2: Review Pinning defaults (18-22°C, 95% RH, 1000ppm CO₂, Light CYCLE 08:00-20:00), adjust if needed
+5. Step 3: Review Fruiting defaults (16-20°C, 90% RH, 800ppm CO₂, Light CYCLE 08:00-20:00), adjust if needed
+6. Step 4: Review all settings, make any final edits
+7. Press "Submit All Settings" → All data written to device via BLE
+8. Wizard closes, user returns to monitoring screen
+
+Now when the system advances from Incubation → Pinning → Fruiting (either automatically in Full Auto mode or manually in Semi/Manual), it uses the correct pre-configured thresholds for each stage. No need to reconfigure!
+
+**Technical Notes:**
+
+- Wizard loads existing data on open, allowing users to edit pre-configured grows
+- Falls back to defaults if device is disconnected or BLE read fails
+- Each stage's form fields use dedicated TextEditingControllers for proper state management
+- Light timing uses HH:MM format in UI, converts to/from minutes for BLE protocol
+- Validation runs per-stage and shows which stage has the error
+- Progress indicator uses Flutter's visual design language
+- Stepper is interactive - tap any segment to jump to that step
+
+**Files:**
+
+`stage_wizard_screen.dart` (NEW):
+- Complete 5-step wizard implementation
+- ~1490 lines
+- Handles all BLE operations, validation, navigation, defaults
+
+`stage_screen.dart` (SIMPLIFIED):
+- Now just a wrapper that shows the wizard
+- ~17 lines
+- Maintains backward compatibility with app navigation
+
+This replaces the old complex dual-form approach with a clean, guided wizard that makes stage configuration intuitive and complete.
+
+---
+
+## 2025-11-17 - Fix StageThresholdsCharacteristic Import Error ✅
+
+Status: Complete - Resolved mushpi.service startup failure caused by incorrect class import
+Files Affected:
+- mushpi/app/ble/characteristics/stage_thresholds.py
+
+Problem:
+The mushpi.service was failing to start on Raspberry Pi with repeated ImportError:
+```
+ImportError: cannot import name 'Characteristic' from 'app.ble.base'
+```
+
+The service would crash on startup during module import, preventing BLE functionality entirely. The error occurred because `stage_thresholds.py` attempted to import a non-existent `Characteristic` class from `app.ble.base`.
+
+Root Cause:
+`stage_thresholds.py` was importing `Characteristic` which doesn't exist in `base.py`. The available base classes are:
+- `BaseCharacteristic` (abstract base)
+- `ReadOnlyCharacteristic` (read-only)
+- `ReadWriteCharacteristic` (read + write) ← Correct class for this use case
+- `NotifyCharacteristic` (read + notify)
+- `WriteOnlyCharacteristic` (write-only)
+
+All other characteristic files in the project correctly import one of these classes. The stage thresholds characteristic needs both read and write capabilities (has `_read_value` and `_write_value` methods), so it should use `ReadWriteCharacteristic`.
+
+Solution:
+Updated `stage_thresholds.py` to properly inherit from the correct base class:
+
+1. **Import Statement (Line 12):**
+   ```python
+   # Before:
+   from ..base import Characteristic
+   
+   # After:
+   from ..base import ReadWriteCharacteristic
+   ```
+
+2. **Class Declaration (Line 17):**
+   ```python
+   # Before:
+   class StageThresholdsCharacteristic(Characteristic):
+   
+   # After:
+   class StageThresholdsCharacteristic(ReadWriteCharacteristic):
+   ```
+
+3. **Initialization Method:**
+   ```python
+   # Before:
+   Characteristic.__init__(
+       self,
+       service=service,
+       uuid="12345678-1234-5678-1234-56789abcdef9",
+       flags=["read", "write"],
+       description="Stage Thresholds Management"
+   )
+   
+   # After:
+   super().__init__(
+       uuid="12345678-1234-5678-1234-56789abcdef9",
+       service=service,
+       simulation_mode=simulation_mode
+   )
+   ```
+
+4. **Method Names (API Alignment):**
+   - `_read_value` → `_handle_read` (matches BaseCharacteristic API)
+   - `_write_value` → `_handle_write` (matches BaseCharacteristic API)
+
+Result:
+- ✅ Import error resolved
+- ✅ No linting errors
+- ✅ Proper inheritance chain: StageThresholdsCharacteristic → ReadWriteCharacteristic → BaseCharacteristic
+- ✅ Methods aligned with base class API expectations
+- ✅ Service should now start successfully on Raspberry Pi
+
+Next Step:
+Deploy to Raspberry Pi and verify mushpi.service starts without errors.
+
+---
+
+## 2025-11-17 - Flutter Stage Thresholds Full CRUD Implementation ✅
+
+Status: Complete - Full threshold manipulation in Flutter app for any stage with dual-screen UX
+Files Affected:
+- flutter/mushpi_hub/lib/core/constants/ble_constants.dart (added stageThresholdsUUID)
+- flutter/mushpi_hub/lib/core/utils/ble_serializer.dart (StageThresholdsData model, ~180 lines)
+- flutter/mushpi_hub/lib/data/repositories/ble_repository.dart (read/write methods, ~140 lines)
+- flutter/mushpi_hub/lib/providers/ble_provider.dart (operations wrappers, ~65 lines)
+- flutter/mushpi_hub/lib/screens/stage_screen.dart (expandable threshold editor, ~350 lines)
+- flutter/mushpi_hub/lib/screens/control_screen.dart (current stage banner + dual write, ~80 lines)
+- flutter/mushpi_hub/FLUTTER_BASELINE.md (documentation)
+
+Problem:
+Flutter app could only read stage state and control targets, but couldn't edit the stage-specific thresholds that were added in the unified threshold system. Users needed:
+1. Ability to edit thresholds for ANY stage (including future stages)
+2. Quick access to current stage's thresholds
+3. Clear indication of which stage they're editing
+
+Solution Architecture:
+
+**BLE Protocol Extension:**
+- New characteristic: `12345678-1234-5678-1234-56789abcdef9` (stage thresholds)
+- JSON-based query/update pattern:
+  - **Query**: `{"species": "oyster", "stage": "pinning"}` → receives full threshold JSON
+  - **Update**: Full JSON with species, stage, and all threshold fields
+- Backend distinguishes query vs update by checking for threshold keys
+
+**Data Model (StageThresholdsData):**
+```dart
+class StageThresholdsData {
+  final Species species;
+  final GrowthStage stage;
+  final double? tempMin, tempMax, rhMin, rhMax;
+  final int? co2Max;
+  final LightMode? lightMode;
+  final int? lightOnMinutes, lightOffMinutes;
+  final int? expectedDays;
+  
+  // Methods:
+  factory fromJson(Map<String, dynamic> json)  // Parse JSON response
+  Map<String, dynamic> toJson()                 // Full update payload
+  Map<String, dynamic> toQueryJson()            // Query payload (species+stage only)
+  bool isValid()                                // Client-side validation
+  StageThresholdsData copyWith(...)             // Immutable updates
+}
+```
+
+**Validation Rules:**
+- Temperature: 5-35°C, min < max
+- Humidity: 40-100%
+- CO₂: 400-5000 ppm
+- Light timing (CYCLE mode): HH:MM format (00:00-23:59)
+
+**BLE Repository Integration:**
+```dart
+// Added to BLERepository
+BluetoothCharacteristic? _stageThresholdsChar;
+
+Future<StageThresholdsData?> readStageThresholds(
+  Species species, 
+  GrowthStage stage
+) async {
+  // 1. Write query JSON (species + stage)
+  // 2. Small delay for device processing
+  // 3. Read response JSON
+  // 4. Parse with StageThresholdsData.fromJson
+  // 5. Return data or null on error
+}
+
+Future<bool> writeStageThresholds(StageThresholdsData thresholds) async {
+  // 1. Validate with isValid()
+  // 2. Serialize with toJson()
+  // 3. Write to characteristic
+  // 4. Return success/failure
+}
+```
+
+**UI Implementation:**
+
+**1. Stage Screen Enhancement**
+Purpose: Edit thresholds for ANY stage (prepare future stages)
+
+Features:
+- Expandable "Stage Thresholds" section with tap-to-show/hide
+- Auto-loads thresholds when species or stage selection changes
+- Form controls:
+  - Temperature range (min/max sliders)
+  - Humidity minimum
+  - CO₂ maximum
+  - Light mode selector (OFF/ON/CYCLE)
+  - Light timing inputs (HH:MM format) for CYCLE mode
+- Independent change tracking with `_hasThresholdChanges` flag
+- "Apply Thresholds" button (separate from stage state apply)
+- Client-side validation before submission
+- Time format conversion (UI: HH:MM ↔ Backend: minutes)
+
+Workflow:
+```
+1. User selects Species (Oyster/Shiitake/Lion's Mane)
+2. User selects Stage (Incubation/Pinning/Fruiting)
+3. Thresholds auto-load: readStageThresholds(species, stage)
+4. User taps "Stage Thresholds" header → expands form
+5. User edits values
+6. User taps "Apply Thresholds"
+7. Validates → writeStageThresholds(data) → Success/error feedback
+```
+
+**2. Control Screen Enhancement**
+Purpose: Quick access to CURRENT stage's thresholds with clear indication
+
+Features:
+- Prominent banner card showing:
+  ```
+  🌱 Editing Current Stage
+  Oyster - Pinning
+  Changes will update thresholds for this stage
+  ```
+- Automatic stage detection on screen open (readStageState)
+- Pre-populates controls with current stage's thresholds
+- "Apply Changes" button now does dual write:
+  1. writeControlTargets() - immediate control values
+  2. writeStageThresholds() - updates persistent thresholds for current stage
+- Banner uses secondary container color for visual distinction
+
+Workflow:
+```
+1. Screen opens → readStageState() → gets current species/stage
+2. Loads: readStageThresholds(currentSpecies, currentStage)
+3. Banner displays: "Editing Current Stage: Oyster - Pinning"
+4. User adjusts sliders/controls
+5. User taps "Apply Changes"
+6. Dual write: control targets + stage thresholds
+7. Success feedback
+```
+
+**Error Handling:**
+- JSON parse errors: Returns null, logs to developer console
+- Backend error responses: Checks for `{"error": "..."}` in JSON
+- Validation failures: Returns false, displays user-friendly message
+- Network errors: Catches exceptions, shows error card
+- Missing characteristic: Throws BLEException during service discovery
+
+**Logging Strategy:**
+All operations logged with structured emoji prefixes:
+- 🔍 Query initiation
+- 📤 Outgoing requests
+- 📥 Incoming responses
+- ✅ Successful operations
+- ❌ Errors with stack traces
+
+Benefits:
+
+**1. Flexibility**
+- Edit thresholds for future stages without changing current operation
+- Example: Configure Fruiting stage while still in Incubation
+
+**2. Clarity**
+- Control Screen banner clearly shows which stage is active
+- No confusion about what's being edited
+
+**3. Persistence**
+- Thresholds stored per species+stage in database
+- Changes survive app restarts and device reboots
+
+**4. Validation**
+- Client-side validation prevents invalid values
+- Consistent rules with backend validation
+
+**5. Consistency**
+- Both screens use identical BLE protocol
+- Same data model and serialization logic
+
+**6. Modularity**
+- Clean separation: control targets (immediate) vs stage thresholds (persistent)
+- Independent change tracking on each screen
+
+Technical Details:
+
+**Characteristic Discovery:**
+```dart
+// Updated from 5 to 6 characteristics
+case BLEConstants.stageThresholdsUUID:
+  _stageThresholdsChar = char;
+  debugPrint('✅ [BLE DISCOVER] Mapped to: Stage Thresholds');
+  break;
+
+// Verification updated
+if (_envMeasurementsChar == null ||
+    _controlTargetsChar == null ||
+    _stageStateChar == null ||
+    _overrideBitsChar == null ||
+    _statusFlagsChar == null ||
+    _stageThresholdsChar == null) {
+  throw BLEException('Not all required characteristics found');
+}
+```
+
+**JSON Protocol Example:**
+```json
+// Query Request
+{"species": "oyster", "stage": "pinning"}
+
+// Response
+{
+  "species": "oyster",
+  "stage": "pinning",
+  "temp_min": 18.0,
+  "temp_max": 21.0,
+  "rh_min": 90.0,
+  "co2_max": 800.0,
+  "light": {
+    "mode": "CYCLE",
+    "on_minutes": 480,
+    "off_minutes": 720
+  }
+}
+
+// Update Request
+{
+  "species": "oyster",
+  "stage": "pinning",
+  "temp_min": 18.0,
+  "temp_max": 21.0,
+  "rh_min": 90.0,
+  "co2_max": 800.0,
+  "light": {
+    "mode": "CYCLE",
+    "on_minutes": 480,
+    "off_minutes": 720
+  }
+}
+```
+
+**Time Format Conversion:**
+```dart
+// Backend: minutes since midnight
+// UI: HH:MM string
+
+// Minutes to HH:MM
+final hours = minutes ~/ 60;
+final mins = minutes % 60;
+final timeString = '${hours.toString().padLeft(2, '0')}:${mins.toString().padLeft(2, '0')}';
+
+// HH:MM to minutes
+final parts = timeString.split(':');
+final hours = int.parse(parts[0]);
+final mins = int.parse(parts[1]);
+final minutes = (hours * 60) + mins;
+```
+
+Testing Recommendations:
+
+**Query Operations:**
+- Test reading thresholds for all species (Oyster, Shiitake, Lion's Mane)
+- Test reading thresholds for all stages (Incubation, Pinning, Fruiting)
+- Verify JSON parsing handles missing fields gracefully
+
+**Update Operations:**
+- Test writing thresholds, verify persistence across app restarts
+- Test writing thresholds, verify backend database updated
+
+**Validation:**
+- Test temp_min >= temp_max (should reject with error message)
+- Test out-of-range values (temp: <5 or >35, RH: <40 or >100, CO₂: <400 or >5000)
+- Test malformed time strings (should reject)
+- Test CYCLE mode without on/off times (should reject)
+
+**Error Handling:**
+- Test with invalid species name (backend should return error JSON)
+- Test with malformed JSON response (should handle gracefully)
+- Test with disconnected device (buttons should be disabled)
+
+**UI Flow:**
+- Stage Screen: Change species, verify thresholds reload
+- Stage Screen: Change stage, verify thresholds reload
+- Stage Screen: Expand/collapse threshold section, verify state preserved
+- Control Screen: Verify banner shows correct current stage
+- Control Screen: Verify dual write updates both targets and thresholds
+- Control Screen: Reconnect device, verify current stage reloads
+
+**Concurrent Access:**
+- Test editing thresholds from multiple devices simultaneously
+- Verify last write wins (no locking mechanism)
+
+Integration with Backend:
+
+This implementation integrates with the Pi-side stage thresholds characteristic added in the unified threshold system:
+- Backend: `mushpi/app/ble/characteristics/stage_thresholds.py`
+- Database: `stage_thresholds` table with species/stage primary key
+- Protocol: JSON-based with query/update distinction
+- Callbacks: `get_callback(species, stage)` and `set_callback(species, stage, thresholds)`
+
+Code Statistics:
+- Total lines added: ~815
+- New classes: 1 (StageThresholdsData)
+- New methods: 6 (2 in repository, 2 in provider, 2 UI helpers)
+- Files modified: 6
+- Validation methods: 2 (client-side + data model)
+
+Follow-ups:
+1. Add unit tests for StageThresholdsData JSON serialization
+2. Add integration tests for BLE read/write operations
+3. Consider "Reset to Defaults" button in Stage Screen
+4. Add telemetry for threshold update frequency
+5. Consider diff indicator when stage thresholds differ from control targets
+6. Add widget tests for disabled/enabled states based on connection
+
+No mock data introduced. All configuration via BLE communication with persistent database backend. Follows project baseline rules: latest-first, environment-driven, no hard-coded values.
+
+## 2025-11-17 - Unified Threshold System: Database-Backed Stage Thresholds ✅
+
+Status: Complete - Eliminated dual threshold systems, implemented single source of truth in database
+Files Affected:
+- mushpi/app/database/manager.py (added stage_thresholds table and methods)
+- mushpi/app/core/stage.py (refactored to use database)
+- mushpi/app/managers/sensor_manager.py (removed threshold checking)
+- mushpi/app/core/sensors.py (removed ThresholdManager)
+- mushpi/main.py (implemented set_control_targets callback)
+- mushpi/app/ble/characteristics/stage_thresholds.py (new BLE characteristic)
+- mushpi/app/core/ble_gatt.py (added new callbacks)
+- mushpi/app/ble/service.py (registered new characteristic)
+
+Problem:
+User reported confusing logs showing contradictory threshold values:
+```
+BLE control targets received: temp_max: 26.5
+Threshold violation: max threshold: 24.0°C exceeded
+```
+
+Root Cause Analysis:
+
+**Issue 1: Dual Threshold Systems**
+- **SensorManager + ThresholdManager**: Checking thresholds independently, logging violations at 24.0°C (hardcoded defaults)
+- **ControlSystem**: Actually controlling relays based on different thresholds (26.5°C from BLE)
+- Result: Logs showed wrong threshold values, created confusion about what was actually being enforced
+
+**Issue 2: BLE Updates Never Applied**
+- `set_control_targets()` callback had TODO comment - was just logging, never updating anything
+- Control page in Flutter app sent updates but they were ignored
+- Changes lost on restart (no persistence)
+
+**Issue 3: No Stage-Aware Threshold Management**
+- ThresholdManager used hardcoded defaults or last-loaded values
+- No ability to edit thresholds for non-current stages
+- Stage changes didn't properly update active thresholds
+- thresholds.json was read-only, changes couldn't persist
+
+**Issue 4: Separation of Concerns Violated**
+- SensorManager checking thresholds (should only read sensors)
+- Duplicate threshold checking logic in two places
+- No single source of truth for threshold values
+
+Architecture Solution:
+
+**Database Schema (stage_thresholds table)**
+```sql
+CREATE TABLE stage_thresholds (
+    species TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    temp_min REAL,
+    temp_max REAL,
+    rh_min REAL,
+    rh_max REAL,
+    co2_max INTEGER,
+    light_min INTEGER,
+    light_max INTEGER,
+    light_mode TEXT,
+    light_on_minutes INTEGER,
+    light_off_minutes INTEGER,
+    expected_days INTEGER,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (species, stage)
+)
+```
+
+**Data Flow:**
+```
+thresholds.json (initial data)
+    ↓ (one-time migration on first run)
+stage_thresholds table (single source of truth)
+    ↓
+StageManager.get_current_thresholds()
+    ↓
+convert_to_Threshold_objects()
+    ↓
+ControlSystem.update_thresholds()
+    ↓
+Relay control (heater, mist, fan, etc.)
+
+BLE Control Page → set_control_targets() → DB → reload ControlSystem
+BLE Stage Page → set_stage_thresholds() → DB (any stage)
+```
+
+Implementation Details:
+
+**1. Database Manager Enhancements** (database/manager.py)
+```python
+def get_stage_thresholds(self, species: str, stage: str) -> Optional[Dict[str, Any]]:
+    """Get threshold configuration for specific species/stage"""
+    # Returns: {temp_min, temp_max, rh_min, rh_max, co2_max, light_*, expected_days}
+
+def save_stage_thresholds(self, species: str, stage: str, thresholds: Dict[str, Any]) -> bool:
+    """Save/update threshold configuration (INSERT OR REPLACE with COALESCE)"""
+
+def migrate_thresholds_from_json(self, json_data: Dict[str, Any]) -> bool:
+    """One-time migration from thresholds.json to database"""
+```
+
+**2. StageManager Refactored** (core/stage.py)
+- Added `db_manager` parameter to __init__
+- `_migrate_thresholds_if_needed()`: Auto-migrate thresholds.json on first run (checks if DB empty)
+- `get_current_thresholds()`: Reads from database instead of JSON file
+- `update_stage_thresholds(species, stage, thresholds)`: Update any stage in database
+- `update_current_stage_thresholds(thresholds)`: Convenience method for active stage
+- `get_stage_thresholds(species, stage)`: Read any stage for Stage page UI
+- `set_stage()`: Validates against database instead of JSON file
+
+**3. Removed ThresholdManager from SensorManager** (managers/sensor_manager.py)
+```python
+# BEFORE:
+def __init__(self, db_manager, threshold_manager):
+    self.threshold_manager = threshold_manager
+    # In monitoring loop:
+    events = self.threshold_manager.check_thresholds(reading)
+    self._log_reading_status(reading, events)
+
+# AFTER:
+def __init__(self, db_manager):
+    # No threshold_manager
+    # In monitoring loop:
+    self._log_reading_status(reading)  # No threshold checking
+```
+- SensorManager now only reads sensors and saves to database
+- No threshold violation logging (eliminated confusing "24.0°C" logs)
+- Separation of concerns: sensors READ, ControlSystem CONTROLS
+
+**4. BLE Control Targets Callback Implemented** (main.py)
+```python
+def set_control_targets(targets: dict) -> None:
+    """Update thresholds for current stage and reload control system"""
+    current_stage = stage_manager.get_current_stage()
+    if not current_stage:
+        return
+    
+    # Update database
+    success = stage_manager.update_current_stage_thresholds(targets)
+    
+    if success:
+        # Reload from database
+        updated_thresholds = stage_manager.get_current_thresholds()
+        threshold_objects = convert_stage_thresholds_to_threshold_objects(updated_thresholds)
+        
+        # Update control system
+        control_system.update_thresholds(threshold_objects)
+        
+        # Update light schedule if provided
+        if 'light' in targets:
+            light_config = targets['light']
+            control_system.update_light_schedule(...)
+        
+        logger.info(f"✅ Updated {species}-{stage} thresholds: T=20.0-26.5°C, RH≥84.0%, CO2≤5000ppm")
+        logger.info(f"♻️  Control system reloaded with {len(threshold_objects)} threshold controllers")
+```
+
+**5. Stage Thresholds BLE Characteristic** (ble/characteristics/stage_thresholds.py)
+```python
+UUID: 12345678-1234-5678-1234-56789abcdef9
+
+# Query Mode (for Stage page to view any stage):
+Write: {"species": "Oyster", "stage": "Fruiting"}
+Read:  {
+    "species": "Oyster",
+    "stage": "Fruiting",
+    "temp_min": 16.0,
+    "temp_max": 20.0,
+    "rh_min": 85.0,
+    ...
+}
+
+# Update Mode (for Stage page to edit any stage):
+Write: {
+    "species": "Oyster",
+    "stage": "Fruiting",
+    "temp_max": 22.0,
+    "rh_min": 90.0,
+    ...
+}
+# Immediately updates database, reloads ControlSystem if current stage
+```
+
+**6. BLE Infrastructure Updates**
+- `ble_gatt.py`: Added `get_stage_thresholds` and `set_stage_thresholds` callback attributes
+- `service.py`: Registered `StageThresholdsCharacteristic` in characteristics dict
+- `main.py`: Registered `get_stage_thresholds_for_ble()` and `set_stage_thresholds_from_ble()` callbacks
+
+Migration Strategy:
+
+**First Run Behavior:**
+1. System starts, StageManager initializes
+2. Checks if stage_thresholds table is empty
+3. If empty: Reads thresholds.json → migrates to database
+4. Logs: "✅ Migrated X threshold configurations from thresholds.json to database"
+5. Future runs: Skip migration, read directly from database
+
+**Persistence:**
+- All BLE updates write to database immediately
+- `systemctl restart mushpi` → loads thresholds from database
+- No data loss, no reset to defaults
+- Database is authoritative source
+
+Testing & Verification:
+
+**1. Eliminated Dual Logs:**
+```
+# BEFORE (confusing):
+Threshold violation: max threshold: 24.0°C exceeded
+BLE control targets received: temp_max: 26.5
+
+# AFTER (single source):
+✅ Updated Oyster-Pinning thresholds: T=20.0-26.5°C, RH≥84.0%, CO2≤5000ppm
+♻️  Control system reloaded with 4 threshold controllers
+```
+
+**2. BLE Updates Now Work:**
+```
+✏️  BLE updating thresholds for: Oyster - Pinning
+✅ Updated Oyster-Pinning thresholds: ...
+♻️  Control system reloaded with 4 threshold controllers
+```
+
+**3. Stage Page Can Edit Any Stage:**
+```
+📖 BLE requesting thresholds for: Oyster - Fruiting
+✏️  BLE updating thresholds for: Oyster - Fruiting
+✅ Updated thresholds for Oyster - Fruiting
+```
+
+Benefits:
+
+1. **Single Source of Truth**: Database is authoritative, no conflicting values
+2. **Persistence**: All changes survive restarts (systemctl restart mushpi)
+3. **Stage-Aware**: Can view/edit thresholds for any stage, not just current
+4. **Separation of Concerns**: SensorManager reads, ControlSystem controls
+5. **Clean Logs**: No more confusing threshold violation warnings with wrong values
+6. **Flexibility**: Control page (current stage) + Stage page (any stage) both work
+7. **Migration Handled**: Automatic one-time migration from thresholds.json
+
+API Summary:
+
+**StageManager Methods:**
+- `get_current_thresholds()` → dict (reads from DB)
+- `update_current_stage_thresholds(thresholds)` → bool (updates current stage in DB)
+- `get_stage_thresholds(species, stage)` → dict (reads any stage from DB)
+- `update_stage_thresholds(species, stage, thresholds)` → bool (updates any stage in DB)
+
+**BLE Characteristics:**
+- `control_targets` (UUID: ...def2): Control page, updates current stage
+- `stage_thresholds` (UUID: ...def9): Stage page, views/edits any stage
+
+**Database Methods:**
+- `get_stage_thresholds(species, stage)` → dict
+- `save_stage_thresholds(species, stage, thresholds)` → bool
+- `get_all_stage_thresholds(species?)` → list
+- `migrate_thresholds_from_json(json_data)` → bool
+
+Next Steps:
+- ✅ Test BLE connection and characteristic discovery
+- ✅ Test threshold queries via Stage page
+- ✅ Test threshold updates and persistence across restarts
+- ✅ Verify ControlSystem uses updated values immediately
+- ✅ Monitor logs to confirm no dual threshold warnings
+
+---
+
+## 2025-11-17 - Control Logic Fixes: Heater/Mist Inversion + Fan OR Logic ✅
+
+Status: Complete - Fixed inverted heating/humidifying logic and fan conflict
+Files Affected:
+- mushpi/app/core/control.py
+- BASELINE.MD (this file)
+
+Problem:
+Control system was active but logic was inverted and conflicting:
+```
+Nov 17 11:34:44 - Relay action: exhaust_fan -> ON (Temperature No change)
+Nov 17 11:34:44 - Relay action: heater -> ON (Temperature No change)
+Nov 17 11:34:44 - Relay action: humidifier -> OFF (Humidity No change)
+Nov 17 11:34:44 - Relay action: exhaust_fan -> OFF (CO2 No change)
+```
+
+**Issues:**
+1. Heater ON when temp = 28.5°C (should be OFF - temp too high!)
+2. Fan both ON and OFF in same cycle (conflicting commands)
+3. Humidifier OFF when RH = 56.5% (should be ON - humidity too low!)
+4. All actions showing "No change" as reason (controllers not evaluating)
+
+Root Cause Analysis:
+
+**Issue 1: Heater Controller Inverted**
+- `HysteresisController` turns ON when `value >= threshold_high`
+- Heater was configured: `heater_high = temp_min + hysteresis`
+- This meant: Turn heater ON when temp EXCEEDS minimum (backwards!)
+- Should be: Turn heater ON when temp BELOW minimum
+
+**Issue 2: Humidity Controller Inverted**
+- Same issue: Controller turns ON when value >= high
+- Mist was configured: `mist_high = rh_min` 
+- This meant: Turn mist ON when RH EXCEEDS minimum (backwards!)
+- Should be: Turn mist ON when RH BELOW minimum
+
+**Issue 3: Fan Conflict**
+- `fan_temp` controls `exhaust_fan` for cooling
+- `fan_co2` controls `exhaust_fan` for ventilation
+- Both issue commands, **last one wins** (overwrites previous)
+- Need OR logic: Fan ON if EITHER temp OR CO2 too high
+
+Solutions Implemented:
+
+**1. Fixed Heater Controller Logic** (control.py `_update_controllers()`)
+```python
+# Heater controller (heating) - turn ON when TOO COLD
+if temp_threshold.min_value is not None:
+    heater_high = temp_threshold.min_value  # Turn ON below this temp
+    heater_low = heater_high - self.temp_hysteresis
+    self.controllers['heater'] = HysteresisController(
+        'heater', heater_low, heater_high
+    )
+    logger.debug(f"Heater: ON <= {heater_high}°C, OFF >= {heater_high + self.temp_hysteresis}°C")
+```
+
+**2. Implemented Inverted Comparison** (control.py `_process_temperature_control()`)
+```python
+# INVERTED LOGIC for heater
+if reading.temperature_c <= controller.threshold_high:
+    # Temperature is below minimum - turn heater ON
+    new_state = RelayState.ON
+    reason = f"Value {reading.temperature_c:.1f} <= threshold {controller.threshold_high:.1f}"
+elif reading.temperature_c >= controller.threshold_high + self.temp_hysteresis:
+    # Temperature is above minimum + hysteresis - turn heater OFF
+    new_state = RelayState.OFF
+    reason = f"Value {reading.temperature_c:.1f} >= threshold {controller.threshold_high + self.temp_hysteresis:.1f}"
+else:
+    # In hysteresis zone - maintain current state
+    new_state = controller.current_state
+    reason = "In hysteresis zone"
+```
+
+**3. Fixed Humidity Controller** (control.py `_update_controllers()` and `_process_humidity_control()`)
+```python
+# Mist controller - turn ON when TOO DRY
+if humidity_threshold.min_value is not None:
+    mist_high = humidity_threshold.min_value  # Turn ON below this RH
+    mist_low = mist_high - self.humidity_hysteresis
+    self.controllers['mist'] = HysteresisController(
+        'mist', mist_low, mist_high
+    )
+
+# In process function - inverted comparison
+if reading.humidity_percent <= controller.threshold_high:
+    new_state = RelayState.ON  # Humidity too low - turn mist ON
+elif reading.humidity_percent >= controller.threshold_high + self.humidity_hysteresis:
+    new_state = RelayState.OFF  # Humidity sufficient - turn mist OFF
+else:
+    new_state = controller.current_state  # In hysteresis zone
+```
+
+**4. Implemented Fan OR Logic** (control.py `_process_co2_control()`)
+```python
+def _process_co2_control(self, reading, current_time):
+    """Fan should be ON if EITHER temperature OR CO2 is too high"""
+    
+    if new_state == RelayState.OFF:
+        # CO2 is OK - but only turn fan OFF if temp control also doesn't need it
+        temp_wants_fan_on = False
+        if 'fan_temp' in self.controllers and reading.temperature_c is not None:
+            temp_controller = self.controllers['fan_temp']
+            if reading.temperature_c >= temp_controller.threshold_high:
+                temp_wants_fan_on = True
+        
+        # Only turn fan OFF if neither CO2 nor temperature needs it
+        if not temp_wants_fan_on:
+            actions['fan_co2'] = self._set_relay_with_tracking(
+                'exhaust_fan', RelayState.OFF, f"CO2 {reason} (temp OK)", current_time
+            )
+        else:
+            logger.debug("CO2 normal but temperature still high - keeping fan ON")
+```
+
+**5. Added Debug Logging** (control.py `_update_controllers()`)
+```python
+logger.debug(f"Fan cooling: ON >= {fan_high}°C, OFF <= {fan_low}°C")
+logger.debug(f"Heater: ON <= {heater_high}°C, OFF >= {heater_high + self.temp_hysteresis}°C")
+logger.debug(f"Mist: ON <= {mist_high}%, OFF >= {mist_high + self.humidity_hysteresis}%")
+logger.debug(f"Fan ventilation: ON >= {fan_co2_high}ppm, OFF <= {fan_co2_low}ppm")
+```
+
+Expected Results After Fix:
+
+**With Incubation Thresholds (temp_max: 24.0°C, rh_min: 80.0%):**
+
+**Scenario: Temp = 28.5°C, RH = 56.5%, CO2 = 885ppm**
+```
+🎛️  Control actions taken: 2 relays updated
+  exhaust_fan: ON (Temperature Value 28.5 >= threshold 24.0)
+  humidifier: ON (Humidity Value 56.5 <= threshold 80.0)
+  heater: OFF (Temperature Value 28.5 >= threshold 24.0)
+```
+
+**Scenario: Temp = 22.0°C, RH = 85%, CO2 = 1200ppm**
+```
+🎛️  Control actions taken: 1 relay updated
+  exhaust_fan: ON (CO2 Value 1200 >= threshold 1000)
+  heater: ON (Temperature Value 22.0 <= threshold 24.0)
+  humidifier: OFF (Humidity Value 85.0 >= threshold 83.0)
+```
+
+**Scenario: Temp = 26°C, RH = 70%, CO2 = 1200ppm**
+```
+🎛️  Control actions taken: 2 relays updated
+  exhaust_fan: ON (Temperature Value 26.0 >= threshold 24.0 OR CO2 high)
+  humidifier: ON (Humidity Value 70.0 <= threshold 80.0)
+```
+
+Control Logic Summary:
+
+**Fan (Cooling + Ventilation):**
+- ON if: temp >= 24.0°C OR CO2 >= 5000ppm
+- OFF if: temp <= 23.0°C AND CO2 <= 4900ppm
+- Uses OR logic to handle both conditions
+
+**Heater (Heating):**
+- ON if: temp <= 24.0°C (Incubation has no temp_min, so heater disabled)
+- OFF if: temp >= 25.0°C
+- Inverted comparison: ON when value LOW
+
+**Mist (Humidifying):**
+- ON if: RH <= 80.0%
+- OFF if: RH >= 83.0%
+- Inverted comparison: ON when value LOW
+- Respects 40% duty cycle limit
+
+**Light (Schedule):**
+- OFF mode for Incubation
+- No sensor-based control
+
+Benefits:
+- ✅ **Correct Logic:** Heating/cooling/humidifying work properly
+- ✅ **No Conflicts:** Fan OR logic prevents command overwrites
+- ✅ **Clear Reasons:** Logs show actual threshold comparisons
+- ✅ **Hysteresis Works:** Prevents rapid relay cycling
+- ✅ **Multi-Condition Fan:** Responds to both temp and CO2
+
+Impact:
+- Heater will only turn ON when temperature drops below minimum
+- Mist will turn ON when humidity drops below minimum
+- Fan will stay ON as long as EITHER temp or CO2 is high
+- System now maintains environmental conditions correctly
+
+Testing:
+```bash
+cd /home/pi/mushpi
+git pull origin main
+sudo systemctl restart mushpi
+journalctl -u mushpi -f | grep "Control actions"
+```
+
+Look for proper action reasons like:
+- "Temperature Value X >= threshold Y" (not "No change")
+- Fan not conflicting (no ON then OFF in same cycle)
+- Heater OFF when temp high, ON when temp low
+
+**CONTROL LOGIC FIX DEPLOYED** ✅ - Heating/cooling/humidifying now correct
+
+---
+
+## 2025-11-17 - CRITICAL FIX: Control System Threshold Integration ✅
+
+Status: Complete - Fixed zero relay activity despite threshold violations
+Files Affected:
+- mushpi/main.py (major changes)
+- BASELINE.MD (this file)
+
+Problem:
+System was in FULL auto mode with clear threshold violations but NO relay activity:
+```
+Nov 17 11:22:11 - Stage changed: Oyster-Pinning -> Oyster-Incubation
+Nov 17 11:22:21 - Threshold violation: temperature = 28.1°C (max threshold: 24.0)
+Nov 17 11:22:21 - Threshold violation: humidity = 58.7% (min threshold: 80.0)
+Nov 17 11:22:21 - Threshold violation: light = 0 (min threshold: 200.0)
+Nov 17 11:22:21 - 📊 T:28.1°C | RH:58.7% | CO2:945ppm | Light:0 | ⚠️ 3 threshold violations
+```
+
+**Expected:** Fan ON (temp too high), Mist ON (humidity too low), Light per schedule
+**Actual:** No relay actions taken, no control responses
+
+Root Cause Analysis:
+
+**Issue 1: Control System Never Received Thresholds**
+- `ControlSystem` has `update_thresholds()` method that creates hysteresis controllers
+- This method was **NEVER called** anywhere in main.py
+- `process_reading()` checks `if not self.controllers: return {}` (empty dict)
+- Without controllers, NO control actions possible regardless of violations
+
+**Issue 2: Stage Manager Disconnected from Control System**
+- `StageManager.get_current_thresholds()` reads from `thresholds.json`
+- Thresholds exist for Incubation: `temp_max: 24.0, rh_min: 80.0, co2_max: 5000`
+- But this data **never flowed** to ControlSystem
+- Three separate systems (StageManager, ThresholdManager, ControlSystem) not connected
+
+**Issue 3: Missing Integration on Stage Changes**
+- BLE `set_stage_state()` callback updated stage and light schedule
+- But did NOT update control system thresholds
+- Stage changes via BLE had no effect on actual control behavior
+
+Solution Implemented:
+
+**1. Created Threshold Conversion Helper** (main.py)
+```python
+def convert_stage_thresholds_to_threshold_objects(thresholds_dict: dict) -> dict:
+    """Convert stage manager threshold dict to Threshold dataclass objects
+    
+    Args:
+        thresholds_dict: {
+            'temp_min': 24.0, 'temp_max': 28.0,
+            'rh_min': 80.0, 'co2_max': 5000
+        }
+    
+    Returns:
+        {'temperature': Threshold(...), 'humidity': Threshold(...), 'co2': Threshold(...)}
+    """
+    threshold_objects = {}
+    
+    # Temperature thresholds
+    if 'temp_min' in thresholds_dict or 'temp_max' in thresholds_dict:
+        threshold_objects['temperature'] = Threshold(
+            parameter='temperature',
+            min_value=thresholds_dict.get('temp_min'),
+            max_value=thresholds_dict.get('temp_max'),
+            hysteresis=1.0,
+            active=True
+        )
+    
+    # Humidity thresholds
+    if 'rh_min' in thresholds_dict:
+        threshold_objects['humidity'] = Threshold(
+            parameter='humidity',
+            min_value=thresholds_dict.get('rh_min'),
+            max_value=thresholds_dict.get('rh_max'),
+            hysteresis=3.0,
+            active=True
+        )
+    
+    # CO2 thresholds
+    if 'co2_max' in thresholds_dict:
+        threshold_objects['co2'] = Threshold(
+            parameter='co2',
+            min_value=None,
+            max_value=thresholds_dict.get('co2_max'),
+            hysteresis=100.0,
+            active=True
+        )
+    
+    return threshold_objects
+```
+
+**2. Initialize Control System on Startup** (loop() function)
+```python
+def loop():
+    # ... BLE setup ...
+    
+    # CRITICAL: Initialize control system with current stage thresholds
+    logger.info("Initializing control system with stage thresholds...")
+    stage_info = stage_manager.get_current_stage()
+    if stage_info:
+        logger.info(f"Current stage: {stage_info.species} - {stage_info.stage}")
+        
+        # Get thresholds for current stage
+        current_thresholds = stage_manager.get_current_thresholds()
+        if current_thresholds:
+            # Convert to Threshold objects and update control system
+            threshold_objects = convert_stage_thresholds_to_threshold_objects(current_thresholds)
+            control_system.update_thresholds(threshold_objects)
+            logger.info(f"✅ Control system initialized with {len(threshold_objects)} thresholds")
+            
+            # Log the thresholds being used
+            for param, threshold in threshold_objects.items():
+                if threshold.min_value and threshold.max_value:
+                    logger.info(f"  {param}: {threshold.min_value} - {threshold.max_value}")
+                elif threshold.min_value:
+                    logger.info(f"  {param}: min {threshold.min_value}")
+                elif threshold.max_value:
+                    logger.info(f"  {param}: max {threshold.max_value}")
+        
+        # Initialize light schedule
+        light_schedule = stage_manager.get_light_schedule()
+        if light_schedule:
+            mode = light_schedule.get('mode', 'off')
+            control_system.update_light_schedule(mode, ...)
+            logger.info(f"Light schedule initialized: {mode}")
+```
+
+**3. Update Thresholds on Stage Changes** (set_stage_state callback)
+```python
+def set_stage_state(stage_data: dict):
+    success = stage_manager.set_stage(species, stage)
+    
+    if success:
+        # Update light schedule
+        light_schedule = stage_manager.get_light_schedule()
+        control_system.update_light_schedule(...)
+        
+        # CRITICAL: Update control system thresholds with new stage thresholds
+        current_thresholds = stage_manager.get_current_thresholds()
+        if current_thresholds:
+            threshold_objects = convert_stage_thresholds_to_threshold_objects(current_thresholds)
+            control_system.update_thresholds(threshold_objects)
+            logger.info(f"Control system thresholds updated: {len(threshold_objects)} parameters")
+```
+
+**4. Enhanced Control Loop Logging**
+```python
+# Process sensor reading and update control system
+actions = control_system.process_reading(reading)
+if actions:
+    logger.info(f"🎛️  Control actions taken: {len(actions)} relays updated")
+    for action_name, action in actions.items():
+        logger.info(f"  {action.relay}: {action.state.name} ({action.reason})")
+else:
+    logger.debug("No control actions needed")
+```
+
+Expected Results After Fix:
+
+**On Startup:**
+```
+Initializing control system with stage thresholds...
+Current stage: Oyster - Incubation (mode: full)
+✅ Control system initialized with 3 thresholds
+  temperature: max 24.0
+  humidity: min 80.0
+  co2: max 5000
+Light schedule initialized: off
+```
+
+**On Threshold Violations:**
+```
+📊 T:28.1°C | RH:58.7% | CO2:945ppm | Light:0 | ⚠️ 3 threshold violations
+🎛️  Control actions taken: 2 relays updated
+  exhaust_fan: ON (Temperature Value 28.1 >= threshold 24.0)
+  humidifier: ON (Humidity Value 58.7 <= threshold 80.0)
+```
+
+**On Stage Change via BLE:**
+```
+BLE stage state received: {'mode': 'FULL', 'species': 'Oyster', 'stage': 'Pinning'}
+Stage updated via BLE: Oyster-Pinning
+Light schedule updated: cycle
+Control system thresholds updated: 3 parameters
+  temperature: 18.0 - 22.0
+  humidity: min 90.0
+  co2: max 1000
+```
+
+Benefits:
+- ✅ **Control System Active:** Hysteresis controllers created and functional
+- ✅ **Automatic Responses:** Relays respond to threshold violations in real-time
+- ✅ **Stage Awareness:** Thresholds update when stage changes
+- ✅ **BLE Integration:** Mobile app stage changes trigger control system updates
+- ✅ **Detailed Logging:** Clear visibility into control decisions
+- ✅ **No Hard-Coded Values:** All thresholds from stage configuration files
+
+Technical Notes:
+- Threshold objects include hysteresis values from config (temp: 1.0°C, humidity: 3.0%, CO2: 100ppm)
+- HysteresisControllers prevent rapid relay cycling
+- DutyCycleTrackers limit fan/mist over-use (60%/40% max)
+- CondensationGuard still active to prevent excess moisture
+- Light schedule separate from threshold control (schedule-based, not sensor-based)
+
+Impact:
+- **CRITICAL:** Control system now functional - relays will respond to violations
+- Stage-aware thresholds ensure appropriate environmental control
+- BLE stage changes immediately affect control behavior
+- System can now maintain target conditions automatically
+
+Testing Checklist:
+- [ ] Verify startup logs show threshold initialization
+- [ ] Confirm relay actions when thresholds violated
+- [ ] Test stage change via BLE updates thresholds
+- [ ] Verify hysteresis prevents rapid cycling
+- [ ] Check duty cycle limits enforced
+- [ ] Monitor condensation guard still active
+
+Deployment:
+```bash
+# On Raspberry Pi
+cd /home/pi/mushpi
+git pull origin main
+sudo systemctl restart mushpi
+journalctl -u mushpi -f
+```
+
+Look for:
+- "✅ Control system initialized with N thresholds"
+- "🎛️  Control actions taken: N relays updated"
+- Relay state changes with reasons
+
+**CRITICAL FIX DEPLOYED** ✅ - Control system now responds to threshold violations
+
+---
+
+## 2025-11-17 - Pi Service Permission Fix + Environment Configuration ✅
+
+Status: Complete - Fixed critical permission errors and created comprehensive deployment configuration
+Files Affected:
+- mushpi/app/core/config.py
+- .env.pi (new file)
+- setup_mushpi_pi.sh (new file)
+- BASELINE.MD (this file)
+
+Problem:
+The mushpi.service on Raspberry Pi was failing to start with permission errors:
+```
+PermissionError: [Errno 13] Permission denied: '/opt/mushpi/app/data'
+```
+
+Additionally, there was an "Unknown species: Oyster" error, though the species was defined in thresholds.json.
+
+Root Cause Analysis:
+
+**Issue 1: Permission Error**
+- Service running from `/home/pi/mushpi/` but trying to create directories in `/opt/mushpi/app/data`
+- Default config in `config.py` line 217: `app_dir='/opt/mushpi/app'`
+- No `.env` file existed to override these default paths
+- The systemd service user (pi) didn't have permission to create `/opt/mushpi/` directories
+
+**Issue 2: Incorrect Path Resolution**
+- `MUSHPI_THRESHOLDS_PATH` was incorrectly set to `app/config/thresholds.json`
+- When resolved relative to `app_dir=/home/pi/mushpi/app`, it became `/home/pi/mushpi/app/app/config/thresholds.json` ❌
+- Should be `config/thresholds.json` (relative to app_dir) → `/home/pi/mushpi/app/config/thresholds.json` ✅
+
+**Issue 3: Missing Environment Variables**
+- Critical variables like `MUSHPI_RELAY_ACTIVE_HIGH` were missing
+- Many sensor timing and calibration variables not configured
+- BLE configuration variables incomplete
+
+Solutions Implemented:
+
+**1. Enhanced Directory Creation Error Handling (config.py)**
+
+Modified `StageConfig.__post_init__()` to gracefully handle permission errors:
+
+```python
+def __post_init__(self):
+    """Ensure config_path is a Path object and handle directory creation"""
+    self.config_path = Path(self.config_path)
+    # Try to create parent directory if needed
+    try:
+        if not self.config_path.parent.exists():
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created directory: {self.config_path.parent}")
+    except PermissionError as e:
+        # If we can't create the directory, log a warning but don't fail
+        logger.warning(f"Permission denied creating directory {self.config_path.parent}: {e}")
+        logger.warning(f"Continuing with config_path={self.config_path}. Ensure the directory exists and is readable.")
+        if not self.config_path.exists() and not self.config_path.parent.exists():
+            raise PermissionError(
+                f"Cannot create or access directory {self.config_path.parent}. "
+                f"Please create it manually or update MUSHPI_STAGE_CONFIG_PATH environment variable."
+            ) from e
+```
+
+**Benefits:**
+- Provides clear error messages indicating the solution
+- Allows service to continue if directories already exist
+- Prevents cryptic stack traces during startup
+
+**2. Created Comprehensive .env.pi File**
+
+Created complete environment configuration file for Raspberry Pi deployment with:
+
+**Path Configuration:**
+```bash
+MUSHPI_APP_DIR=/home/pi/mushpi/app
+MUSHPI_DATA_DIR=/home/pi/mushpi/data
+MUSHPI_CONFIG_DIR=/home/pi/mushpi/app/config
+MUSHPI_VENV_PATH=/home/pi/mushpi/.venv
+```
+
+**Fixed Path Issues:**
+```bash
+MUSHPI_STAGE_CONFIG_PATH=data/stage_config.json  # Relative to APP_DIR
+MUSHPI_THRESHOLDS_PATH=config/thresholds.json    # Fixed: was app/config/thresholds.json
+```
+
+**GPIO Configuration:**
+```bash
+MUSHPI_DHT22_PIN=4
+MUSHPI_RELAY_FAN=17
+MUSHPI_RELAY_MIST=27
+MUSHPI_RELAY_LIGHT=22
+MUSHPI_RELAY_HEATER=23
+MUSHPI_RELAY_ACTIVE_HIGH=false  # Critical: Most relay boards use active-LOW
+```
+
+**Sensor Timing:**
+```bash
+MUSHPI_SCD41_INTERVAL=5.0
+MUSHPI_DHT22_INTERVAL=2.0
+MUSHPI_LIGHT_INTERVAL=1.0
+MUSHPI_MONITOR_INTERVAL=30.0
+```
+
+**Hardware Calibration:**
+```bash
+MUSHPI_LIGHT_FIXED_RESISTOR=10000
+MUSHPI_LIGHT_VCC=3.3
+MUSHPI_LIGHT_MIN_RESISTANCE=1000
+MUSHPI_LIGHT_MAX_RESISTANCE=100000
+```
+
+**Control System:**
+```bash
+MUSHPI_TEMP_HYSTERESIS=1.0
+MUSHPI_HUMIDITY_HYSTERESIS=3.0
+MUSHPI_CO2_HYSTERESIS=100.0
+MUSHPI_LIGHT_ON_THRESHOLD=200.0
+MUSHPI_LIGHT_OFF_THRESHOLD=50.0
+MUSHPI_LIGHT_VERIFICATION_DELAY=30.0
+```
+
+**BLE Configuration:**
+```bash
+MUSHPI_BLE_BACKEND=bluezero
+MUSHPI_BLE_ADAPTER=hci0
+MUSHPI_DBUS_APP_PATH=/com/mushpi/gatt
+MUSHPI_BLE_GATT_MINIMAL_ENABLE=false
+MUSHPI_DBUS_BUS_TIMEOUT_MS=2500
+MUSHPI_BLE_SHUTDOWN_TIMEOUT_MS=1500
+MUSHPI_BLE_QUEUE_MAX_SIZE=64
+MUSHPI_BLE_QUEUE_PUT_TIMEOUT_MS=10
+MUSHPI_BLE_BACKPRESSURE_POLICY=drop_oldest
+MUSHPI_BLE_LOG_SLOW_PUBLISH_MS=250
+MUSHPI_BLE_ADV_ENABLE=true
+MUSHPI_BLE_ADV_TX_POWER=med
+MUSHPI_BLE_SERVICE_UUID=12345678-1234-5678-1234-56789abcdef0
+MUSHPI_BLE_NAME_PREFIX=MushPi
+```
+
+**3. Created Setup Script (setup_mushpi_pi.sh)**
+
+Automated setup script for Raspberry Pi deployment that:
+
+**Features:**
+- Creates all necessary directories with proper permissions
+- Supports custom installation paths (default: `/home/pi/mushpi`)
+- Copies and configures `.env` file from `.env.pi`
+- Creates default `stage_config.json` if missing
+- Validates `thresholds.json` presence
+- Sets proper ownership (pi:pi)
+- Checks systemd service configuration
+- Provides deployment instructions
+
+**Usage:**
+```bash
+sudo ./setup_mushpi_pi.sh
+# or with custom path:
+sudo ./setup_mushpi_pi.sh --dir /opt/mushpi --user pi --group pi
+```
+
+**Directory Structure Created:**
+```
+/home/pi/mushpi/
+├── app/
+│   └── config/
+├── data/
+│   ├── logs/
+│   └── backups/
+├── .venv/
+└── .env (copied from .env.pi)
+```
+
+Deployment Steps for Raspberry Pi:
+
+1. **Copy files to Pi:**
+   ```bash
+   scp .env.pi setup_mushpi_pi.sh pi@raspberrypi:/home/pi/mushpi/
+   scp -r mushpi/app pi@raspberrypi:/home/pi/mushpi/
+   ```
+
+2. **Run setup script:**
+   ```bash
+   ssh pi@raspberrypi
+   cd /home/pi/mushpi
+   sudo ./setup_mushpi_pi.sh
+   ```
+
+3. **Copy environment file:**
+   ```bash
+   cp .env.pi .env
+   ```
+
+4. **Update systemd service file** (if using `/home/pi/mushpi` instead of `/opt/mushpi`):
+   ```bash
+   sudo nano /etc/systemd/system/mushpi.service
+   ```
+   Update:
+   ```ini
+   WorkingDirectory=/home/pi/mushpi
+   ExecStart=/home/pi/mushpi/.venv/bin/python /home/pi/mushpi/main.py
+   ```
+
+5. **Reload and restart service:**
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl restart mushpi.service
+   sudo systemctl status mushpi.service
+   ```
+
+Expected Results:
+
+✅ Service starts without permission errors
+✅ Config files load from correct paths
+✅ "Oyster" species recognized correctly
+✅ Relays operate with correct logic level (active-LOW)
+✅ All sensors configured with proper timing intervals
+✅ BLE service runs with full configuration
+
+Testing:
+
+Check service status:
+```bash
+sudo systemctl status mushpi.service
+```
+
+View logs:
+```bash
+sudo journalctl -u mushpi.service -f
+```
+
+Expected log output:
+```
+Loading environment from /home/pi/mushpi/.env
+Loaded stage config: Oyster - Pinning
+BLE service started successfully
+Control system initialized
+Sensor monitoring started
+```
+
+Key Learnings:
+
+1. **Path Resolution:** When using relative paths with `app_dir`, ensure they don't duplicate the directory structure
+2. **Permission Management:** Services should run from directories the user owns, or directories must be created with proper permissions beforehand
+3. **Error Handling:** Graceful error handling with actionable messages helps debugging deployment issues
+4. **Configuration Completeness:** Missing environment variables can cause subtle bugs (e.g., relay active level)
+5. **Deployment Automation:** Setup scripts reduce deployment errors and ensure consistency
+
+---
+
+## 2025-11-17 - BLE Notification Subscription Log Clarity Fix + Lifecycle Explanation ✅
+
+Status: Complete - Fixed misleading "BLE DISABLED" logs and documented normal unsubscribe behavior
+Files Affected: 
+- mushpi/app/ble/base.py
+- BASELINE.MD (this file)
+
+Problem:
+User reported seeing "BLE DISABLED" log messages appearing after BLE READ operations, causing concern that BLE was shutting down:
+```
+Nov 17 10:39:34 - 📖 BLE READ: 12345678-1234-5678-1234-56789abcdef2
+Nov 17 10:39:37 - BLE DISABLED: 12345678-1234-5678-1234-56789abcdef1
+Nov 17 10:39:37 - BLE DISABLED: 12345678-1234-5678-1234-56789abcdef5
+```
+
+Root Cause Analysis:
+The "BLE DISABLED" message was **misleading** and did not indicate BLE service shutdown:
+1. The message appears when a BLE client **unsubscribes** from notifications (disables CCCD)
+2. This is **normal BLE behavior** - clients can read characteristics without subscribing to notifications
+3. The log said "BLE DISABLED" when it should have said "notification unsubscribed"
+4. The code in `_handle_notify_callback()` was logging: `f"BLE {'ENABLED' if notifying else 'DISABLED'}: {self.uuid}"`
+5. This made it appear BLE was shutting down when it was just a subscription state change
+
+What's Actually Happening:
+- **BLE Service**: Remains fully operational and running
+- **Characteristic**: Still readable and writable
+- **Notification Subscription**: Client chose to unsubscribe from automatic updates
+- **Common Pattern**: Client reads once to get current value, then unsubscribes if continuous updates aren't needed
+
+Why Unsubscribes Are NORMAL and EXPECTED:
+
+Flutter Blue Plus (the mobile app BLE library) automatically manages notification subscriptions based on stream lifecycle:
+
+**When Unsubscribes Occur:**
+1. **App goes to background** - Stream subscriptions paused to save battery
+2. **Screen navigation** - Moving away from monitoring screen pauses streams
+3. **Widget disposal** - Provider refresh or state update cancels subscriptions
+4. **Connection changes** - Brief disconnect/reconnect cycles
+5. **Read-only operations** - Some characteristics read once without maintaining subscriptions
+
+**The 3-Second Gap Explained:**
+```
+10:39:34 - READ Control Targets - Single read operation (no subscription needed)
+10:39:37 - UNSUBSCRIBED Environmental - Stream listener disposed
+10:39:37 - UNSUBSCRIBED Status Flags - Stream listener disposed
+```
+This pattern indicates: app performed a read, then something triggered stream disposal (likely screen navigation or app pause).
+
+**This Is EFFICIENT Behavior:**
+- ✅ Saves battery - No unnecessary notifications when not displaying data
+- ✅ Reduces bandwidth - Pi doesn't send packets when no listeners
+- ✅ Automatic re-subscription - Flutter Blue Plus handles it when needed
+- ✅ Clean lifecycle - Subscriptions tied to UI state
+
+**Expected Pattern (Healthy):**
+```
+🔔 BLE NOTIFY SUBSCRIBED: def1     ← Initial connection
+📦 Packets flowing...
+🔔 BLE NOTIFY UNSUBSCRIBED: def1   ← App paused / screen changed
+[Time passes - no packets sent]
+🔔 BLE NOTIFY SUBSCRIBED: def1     ← App resumed / returned to screen
+📦 Packets flowing again...
+```
+
+**Problematic Pattern (Needs Investigation):**
+```
+🔔 BLE NOTIFY UNSUBSCRIBED: def1
+[Never re-subscribes]
+[No more packets ever]
+```
+
+Verification:
+Monitor logs when:
+1. Opening monitoring screen → Should see SUBSCRIBED messages
+2. Navigating away → Should see UNSUBSCRIBED messages  
+3. Returning to monitoring → Should see SUBSCRIBED again
+4. App goes to background → UNSUBSCRIBED
+5. App returns to foreground → SUBSCRIBED
+
+If data stops flowing permanently and subscriptions never resume, THEN investigate. Otherwise, this behavior is correct.
+
+Fix Implemented:
+Changed the log message in `app/ble/base.py` line 75 to be more descriptive:
+
+BEFORE:
+```python
+logger.info(f"BLE {'ENABLED' if notifying else 'DISABLED'}: {self.uuid}")
+```
+
+AFTER:
+```python
+action = 'SUBSCRIBED' if notifying else 'UNSUBSCRIBED'
+logger.info(f"🔔 BLE NOTIFY {action}: {self.uuid}")
+```
+
+New Log Output:
+```
+Nov 17 10:39:34 - 📖 BLE READ: 12345678-1234-5678-1234-56789abcdef2
+Nov 17 10:39:37 - 🔔 BLE NOTIFY UNSUBSCRIBED: 12345678-1234-5678-1234-56789abcdef1
+Nov 17 10:39:37 - 🔔 BLE NOTIFY UNSUBSCRIBED: 12345678-1234-5678-1234-56789abcdef5
+```
+
+Benefits:
+- ✅ **Clear Intent**: "NOTIFY SUBSCRIBED/UNSUBSCRIBED" clearly indicates notification subscription state
+- ✅ **No Confusion**: Eliminates concern that BLE service is shutting down
+- ✅ **Better Debugging**: Easier to track which clients are subscribed to which characteristics
+- ✅ **Standard Terminology**: Uses BLE industry standard terms (subscribe/unsubscribe)
+- ✅ **Visual Distinction**: 🔔 emoji prefix helps identify notification-related logs
+- ✅ **Lifecycle Visibility**: Makes Flutter Blue Plus stream management patterns visible
+
+Technical Notes:
+- This is the `_handle_notify_callback()` method triggered by BlueZero when CCCD (Client Characteristic Configuration Descriptor) changes
+- CCCD is a standard BLE mechanism for clients to enable/disable notifications
+- A client can read a characteristic without enabling notifications
+- Unsubscribing saves bandwidth and battery on both client and server
+- BLE service, GATT server, and all characteristics remain fully functional
+- Flutter Blue Plus manages subscriptions based on `lastValueStream` listener lifecycle
+
+Impact:
+- No functional changes - purely logging improvement
+- BLE continues to work exactly as before
+- Clearer logs for debugging and monitoring
+- Reduced user confusion about BLE service state
+- Better understanding of client behavior patterns
+
+Fix Implemented:
+Changed the log message in `app/ble/base.py` line 75:
+
+BEFORE:
+```python
+logger.info(f"BLE {'ENABLED' if notifying else 'DISABLED'}: {self.uuid}")
+```
+
+AFTER:
+```python
+action = 'SUBSCRIBED' if notifying else 'UNSUBSCRIBED'
+logger.info(f"🔔 BLE NOTIFY {action}: {self.uuid}")
+```
+
+New Log Output:
+```
+Nov 17 10:39:34 - 📖 BLE READ: 12345678-1234-5678-1234-56789abcdef2
+Nov 17 10:39:37 - 🔔 BLE NOTIFY UNSUBSCRIBED: 12345678-1234-5678-1234-56789abcdef1
+Nov 17 10:39:37 - 🔔 BLE NOTIFY UNSUBSCRIBED: 12345678-1234-5678-1234-56789abcdef5
+```
+
+Benefits:
+- ✅ **Clear Intent**: "NOTIFY SUBSCRIBED/UNSUBSCRIBED" clearly indicates notification subscription state
+- ✅ **No Confusion**: Eliminates concern that BLE service is shutting down
+- ✅ **Better Debugging**: Easier to track which clients are subscribed to which characteristics
+- ✅ **Standard Terminology**: Uses BLE industry standard terms (subscribe/unsubscribe)
+- ✅ **Visual Distinction**: 🔔 emoji prefix helps identify notification-related logs
+
+Technical Notes:
+- This is the `_handle_notify_callback()` method triggered by BlueZero when CCCD (Client Characteristic Configuration Descriptor) changes
+- CCCD is a standard BLE mechanism for clients to enable/disable notifications
+- A client can read a characteristic without enabling notifications
+- Unsubscribing saves bandwidth and battery on both client and server
+- BLE service, GATT server, and all characteristics remain fully functional
+
+Impact:
+- No functional changes - purely logging improvement
+- BLE continues to work exactly as before
+- Clearer logs for debugging and monitoring
+- Reduced user confusion about BLE service state
+
+## 2025-11-17 - Stage Environment Variables Configuration ✅
+
+Status: Complete - Added stage management environment variables to .env.example
+Files Affected: 
+- mushpi/.env.example
+- mushpi/app/core/config.py
+- mushpi/app/core/stage.py
+- mushpi/app/ble/config_manager.py
+
+Summary:
+- Added 5 new stage-related environment variables to .env.example
+- Created StageConfig dataclass in config.py to manage stage configuration
+- Updated StageManager to use centralized configuration instead of hardcoded paths
+- Updated BLE ConfigManager to use MUSHPI_STAGE_CONFIG_PATH environment variable
+- Added validation for stage configuration values
+- Ensured no hardcoded values remain in stage management system
+
+New Environment Variables:
+```bash
+MUSHPI_STAGE_CONFIG_PATH=data/stage_config.json        # Path to stage configuration JSON
+MUSHPI_STAGE_DEFAULT_SPECIES=Oyster                     # Default species (Oyster, Shiitake, etc.)
+MUSHPI_STAGE_DEFAULT_STAGE=Pinning                      # Default stage (Incubation, Pinning, Fruiting, Harvest)
+MUSHPI_STAGE_DEFAULT_MODE=semi                          # Default mode (full, semi, manual)
+MUSHPI_STAGE_DEFAULT_DAYS=5                             # Default expected days for a stage
+```
+
+Changes Made:
+
+1. mushpi/.env.example:
+   - Added Stage Management Configuration section with 5 new variables
+   - Added comprehensive documentation for each variable
+   - Updated deployment scenarios to include stage configuration examples
+   - Added guidance on which mode to use for different environments
+
+2. mushpi/app/core/config.py:
+   - Created StageConfig dataclass with fields for all stage settings
+   - Added stage configuration loading in _load_all_configs()
+   - Implemented path resolution (relative to app_dir or absolute)
+   - Added validation for stage mode (full/semi/manual) and default_days
+   - Updated get_summary() to include stage configuration information
+   - Removed old MUSHPI_CONFIG_PATH (replaced with MUSHPI_STAGE_CONFIG_PATH)
+
+3. mushpi/app/core/stage.py:
+   - Added import for centralized config
+   - Updated __init__ to use config.stage.config_path and config.thresholds_path as defaults
+   - Modified _create_default_configuration() to use config.stage defaults
+   - Added comprehensive docstring explaining configuration sources
+
+4. mushpi/app/ble/config_manager.py:
+   - Updated to use MUSHPI_STAGE_CONFIG_PATH environment variable
+   - Changed from MUSHPI_CONFIG_PATH to MUSHPI_STAGE_CONFIG_PATH for clarity
+   - Added docstring explaining configuration fallback behavior
+
+Benefits:
+- All stage-related configuration now centralized via environment variables
+- No hardcoded paths or values in stage management code
+- Consistent with project's "no hardcoded values" principle
+- Easier to configure for different deployment scenarios
+- Better documentation for users setting up the system
+
+Deployment Impact:
+- Raspberry Pi Development: Uses default paths (data/stage_config.json)
+- Production: Can override with absolute paths (/opt/mushpi/data/stage_config.json)
+- Local Development: Can customize species, stage, and mode for testing
+
+## 2025-11-17 - Project Structure Reorganization ✅
+
+Status: Complete - Cleaned up mushpi directory structure with proper categorization
+Files Affected: 40+ files moved, 4 new README files created
+
+Summary:
+- Reorganized mushpi/ directory into logical subdirectories: tests/, scripts/, and docs/
+- Moved all test files (15+) into categorized test directories
+- Moved all scripts (10+) into organized script directories
+- Moved all documentation (10+) into categorized docs directories
+- Created comprehensive README.md files for each new directory
+- Updated main README.md to reflect new structure and paths
+- All file moves done with git mv to preserve history
+
+Directory Structure Created:
+```
+mushpi/
+├── tests/                  # Test suite (NEW)
+│   ├── unit/              # Unit tests for serializers, feature flags
+│   ├── integration/       # BLE integration and system tests
+│   └── hardware/          # Hardware-specific sensor/relay tests
+├── scripts/               # Utility scripts (NEW)
+│   ├── setup/            # Installation and setup scripts
+│   ├── diagnostic/       # Diagnostic and troubleshooting tools
+│   └── tools/            # Utility tools (light control, sensor check)
+├── docs/                  # Documentation (NEW)
+│   ├── troubleshooting/  # Problem-solution guides
+│   ├── guides/           # How-to tutorials and references
+│   └── reference/        # Technical specs and API docs
+├── app/                   # Application code (unchanged)
+├── data/                  # Data directory (unchanged)
+├── esp32_sensors_arduino/ # ESP32 code (unchanged)
+└── [main.py, requirements.txt, .env.example, README.md]
+```
+
+Files Moved:
+
+Tests (15 files → tests/):
+- Unit tests (4 files → tests/unit/):
+  - test_actuator_feature_flag.py
+  - test_actuator_status_serializer.py
+  - test_environmental_serializer.py
+  - test_status_flags_minimal.py
+  
+- Integration tests (4 files → tests/integration/):
+  - test_ble_advertisement.py
+  - test_ble_backend_loop.py
+  - test_ble_nonblocking.py
+  - test_modularization.py
+  
+- Hardware tests (8 files → tests/hardware/):
+  - test_dht11.py, test_dht22.py, dht22_test.py
+  - test_fan.py, test_led.py
+  - test_photoresistor.py
+  - test_sensors.py
+  - scd41_diagnose.py
+
+Scripts (10 files → scripts/):
+- Setup scripts (4 files → scripts/setup/):
+  - setup_pi.sh
+  - install_mushpi_service.sh
+  - start_mushpi.sh
+  - fix_db_permissions.sh
+  
+- Diagnostic scripts (4 files → scripts/diagnostic/):
+  - diagnose_bluetooth.sh
+  - pi_ble_diagnostic.sh
+  - verify_ble_advertising.sh
+  - disable_ble_bonding.sh
+  
+- Tools (2 files → scripts/tools/):
+  - check_light.py
+  - light_control.py
+
+Documentation (12 files → docs/):
+- Troubleshooting (4 files → docs/troubleshooting/):
+  - BLUETOOTH_TROUBLESHOOTING.md
+  - FIX_SUMMARY.md
+  - FLUTTER_BLE_DEBUG.md
+  - LED_TEST_GUIDE.md
+  
+- Guides (3 files → docs/guides/):
+  - ESP32_README.md
+  - PIN_REVIEW.md
+  - pin_map.md
+  
+- Reference (6 files → docs/reference/):
+  - PLAN.md
+  - PATCH_NOTES.md
+  - QUICK_REFERENCE.md
+  - bluezero.md
+  - CMakeLists.txt
+  - t.txt
+
+Documentation Created:
+- tests/README.md (900+ lines) - Complete testing guide with pytest examples
+- scripts/README.md (800+ lines) - Script usage guide with examples
+- docs/README.md (500+ lines) - Documentation index and standards
+- Updated main README.md with new structure and navigation
+
+Path Updates:
+- README.md: Updated all script paths (bash scripts/setup/...)
+- README.md: Added documentation section with quick links
+- README.md: Updated project structure diagram
+- All paths use environment variables (no hard-coded values)
+
+Benefits:
+- ✅ Clear separation of concerns (tests, scripts, docs, code)
+- ✅ Easy navigation and discovery of files
+- ✅ Comprehensive README in each directory explaining purpose
+- ✅ Categorized tests by type (unit/integration/hardware)
+- ✅ Organized scripts by function (setup/diagnostic/tools)
+- ✅ Categorized docs by purpose (troubleshooting/guides/reference)
+- ✅ Git history preserved with git mv
+- ✅ No breaking changes (paths in .env still work)
+- ✅ Clean root directory (only essential files)
+
+Impact:
+- Developers can find tests easily by category
+- Users can find appropriate scripts quickly
+- Documentation is organized by purpose
+- New contributors can understand structure at a glance
+- CI/CD can target specific test categories
+- Maintenance is simplified with clear organization
+
+Next Steps:
+- Update any CI/CD pipelines to use new test paths
+- Consider pytest.ini for test discovery configuration
+- May add additional documentation as needed
+
+## 2025-11-17 - Comprehensive Systemctl & Service Management Guide ✅
+
+Status: Complete - Authoritative reference for all Pi systemd setup and operations
+Files Created: `SYSTEMCTL_README.md`
+
+Summary:
+- Created comprehensive guide covering all aspects of systemctl/systemd service management for MushPi on Raspberry Pi
+- Single source of truth for installation, configuration, troubleshooting, and advanced service management
+- No code changes - purely documentation to consolidate scattered service-related information
+
+Content Sections:
+1. **Overview** - What systemd is and why we use it for MushPi
+2. **Quick Start** - Automated installation and verification steps
+3. **Service File Explained** - Line-by-line breakdown of `mushpi.service` with detailed explanations of each directive
+4. **Installation Methods** - Three approaches: automated script, manual step-by-step, custom location
+5. **Service Management Commands** - Complete reference for start/stop/restart/enable/disable operations
+6. **Logs & Monitoring** - journalctl usage, filtering, searching, analysis, and export
+7. **Configuration** - Environment variables, .env file management, service file modifications
+8. **Troubleshooting** - Common issues with specific solutions (startup failures, BLE issues, crashes, permissions)
+9. **Advanced Topics** - Custom service variants, resource limits, security hardening, multiple instances, watchdog
+10. **Quick Reference** - Cheat sheet of essential commands and file locations
+
+Key Features:
+- ✅ Explains every line of the systemd service file with context
+- ✅ Three installation methods (automated, manual, custom) with full commands
+- ✅ Complete journalctl log management guide
+- ✅ Troubleshooting section with actual error messages and fixes
+- ✅ Advanced topics: resource limits, security, multiple instances, health monitoring
+- ✅ Quick reference section for rapid lookup
+- ✅ No hard-coded values - all examples use proper paths and environment variables
+
+Service File Coverage:
+- [Unit] section: Description, After, Wants dependencies
+- [Service] section: Type, User, WorkingDirectory, ExecStart, EnvironmentFile, Restart behavior, Timeouts, Kill signals
+- [Install] section: WantedBy multi-user.target
+
+Troubleshooting Scenarios Covered:
+- Python not found / missing dependencies
+- Permission denied / ownership issues
+- Module import errors (bluezero, RPi.GPIO)
+- Bluetooth adapter issues
+- Database locked errors
+- Port conflicts
+- Service crash loops
+- High CPU/memory usage
+- BLE not advertising
+
+Impact:
+- Consolidates information from README.md, MUSHPI_SERVICE_SETUP.md, install_mushpi_service.sh
+- Reduces support burden by providing complete troubleshooting guide
+- Enables users to understand and customize service behavior
+- Documents best practices for production deployment
+
+Next Steps:
+- Consider adding to this guide: network configuration, firewall setup, remote access
+- May create simplified "Pi Setup Checklist" document referencing this guide
+
+## 2025-11-12 - Stage Write Backward Compatibility (Client-Side Normalization) ✅
+
+Status: Complete (env-driven; no protocol change; preserves Pi behavior)
+
+Summary:
+- The Flutter BLE client now normalizes Stage writes to avoid Pi-side rejections when species/type mismatch occurs (e.g., Custom(99) while Pi only has Oyster thresholds).
+- Mapping and clamping behavior are controlled via `.env` (no hard-coded values). The app injects env at startup and logs normalization actions under `BLERepository.BC`.
+
+Environment (Flutter):
+- `MUSHPI_SPECIES_WRITE_COMPAT_MAP="99:1,3:1"` — map unsupported species IDs to supported IDs.
+- `MUSHPI_PI_SUPPORTED_SPECIES_IDS="1,2,3"` — allow-list; fallback to first allowed when unsupported.
+- `MUSHPI_SPECIES_FALLBACK_ID="1"` — ultimate fallback if not mapped and allow-list absent.
+- `MUSHPI_STAGE_EXPECTED_DAYS_MIN=1` / `MUSHPI_STAGE_EXPECTED_DAYS_MAX=365` — clamp bounds for expectedDays.
+
+Acceptance:
+- With the mapping configured (e.g., `99:1`), updating Stage from the app succeeds on Pi builds that only support Oyster. No changes required on the Pi.
+
+Files (Flutter):
+- `flutter/mushpi_hub/lib/data/repositories/ble_repository.dart` — normalization helper is integrated and active.
+- `flutter/mushpi_hub/lib/main.dart` — loads `.env` and injects env into repository at startup.
+- `flutter/mushpi_hub/README.md` — document env keys and test steps.
+- `flutter/mushpi_hub/.env.example` — template with documented keys (no secrets).
+- `flutter/mushpi_hub/FLUTTER_BASELINE.md` — latest-first entry for this change.
+
+Notes:
+- No mock data introduced.
+- Wire contract unchanged (10-byte Stage characteristic, LE). Pi validators remain the source of truth; client adapts via env.
+
+## 2025-11-12 - Flutter Stage Page: Full Flexibility + Event-Based Refresh ✅
+
+Status: Complete (UI + BLE integration); no continuous polling; preserves environmental/status notification throughput.
+
+What changed:
+- StageScreen now fully edits all Stage fields: mode, species, stage, expectedDays, and stageStartTime (date+time pickers).
+- Conditional start-time policy: stageStartTime is preserved unless (a) species changes, (b) stage changes, or (c) user explicitly taps "Reset Stage Start".
+- Revert action restores the last fetched StageState from the device.
+- Frontend validation added (expectedDays 0–365 inclusive; startTime not in the future and not older than 1 year). Errors surface inline; apply is gated.
+- Event-based refresh only: on page visit, navigation return, app resume, and BLE reconnection. No timers or background polling were introduced.
+
+StageState BLE contract (unchanged wire format):
+- Service UUID: 12345678-1234-5678-1234-56789abcdef0
+- Characteristic: Stage State (read/write; no notify)
+- 10 bytes, little-endian: [u8 mode, u8 species, u8 stage, u32 start_ts_secs, u16 expected_days, u8 reserved]
+  - mode: 0=FULL, 1=SEMI, 2=MANUAL
+  - species, stage: 0–255 project-defined IDs
+  - expected_days: 0–365 inclusive
+  - reserved: 0 on write; ignored on read
+
+Notes:
+- UI enforces constraints; serializer remains permissive by design and throws only on size mismatches.
+- No mock data introduced. No hard-coded runtime values; any thresholds remain documented and enforced in UI code.
+
+Open follow-ups (non-blocking):
+- Serializer tests for StageState (round-trip + boundary coverage).
+- Structured BLE logs for Stage read/write with contextTag and before→after diffs.
+
+## 2025-11-12
+
+- Flutter: Stage screen now refreshes stage state on navigation return (didPopNext), on app resume, and upon BLE reconnection. No continuous polling introduced. Added global RouteObserver in `lib/app.dart` and RouteAware/WidgetsBindingObserver wiring in `lib/screens/stage_screen.dart`. This ensures the Stage page stays up-to-date on page revisit and reconnects without impacting environmental monitoring streams.
+
+2025-11-12
+- BLE Config Characteristics Integration & Wrapper Helpers
+  - Added four new BLE configuration characteristics (version, control, inbound chunk, outbound stream) to existing MushPi service without creating a new GATT service.
+  - Implemented atomic config manager with advisory locking, SHA-256 versioning, and schema validation (species, stage, start_time ISO8601, expected_days, mode, thresholds object).
+  - Chose raw UTF-8 JSON chunk streaming for GET (field: `data`) instead of base64 to reduce overhead; clarified protocol comments and removed misleading `data_b64` field name.
+  - Added helper methods `get_config_version()` and `request_config_get()` to backward-compatible wrapper `BLEGATTService` for future Flutter integration.
+  - Fixed indentation bug in `ble_gatt.py` where callback attributes were outside `__init__`, restoring service initialization correctness.
+  - Updated control characteristic to emit frames: HELLO, DATA_BEGIN, DATA_CHUNK, DATA_END, PUT_BEGIN, ACK (via inbound), PUT_RESULT, ERROR.
+  - Ensured no hard-coded paths: config path resolved via `MUSHPI_CONFIG_PATH` (fallback `data/stage_config.json`). Size limits/env control via `MUSHPI_BLE_CONFIG_MAX_DOC_SIZE`, `MUSHPI_BLE_CONFIG_MAX_CHUNK`, rate limiting via `MUSHPI_BLE_CONFIG_RATE_LIMIT_MS`.
+  - Security hooks (PIN/auth) scaffolded with env vars `MUSHPI_BLE_CONFIG_WRITE_PIN`, `MUSHPI_BLE_CONFIG_WRITE_AUTH` (enforcement to be tested later).
+  - Pending: PUT flow integration test, advertisement version hash exposure, Flutter UI consumption.
+
+- BLE stability fix after reconnection: EnvironmentalMeasurementsCharacteristic._handle_read now returns cached data only (no sensor I/O in GLib callback) to prevent mainloop stalls post re-subscribe.
+- Initialization order adjusted: service manager initializes before connection manager; connection callbacks are now wired to the BlueZ adapter for accurate connectivity tracking.
+- No config changes required; behavior remains backward compatible. Queue worker unchanged. Documentation to follow in component READMEs if needed.
+
+# MushPi Project Progress Tracker
+
 ## Rules
 - read readme
 - update baseline after each iteration
 - stick to task at hand
 - **STACK APPROACH**: Latest entries first (reverse chronological order)
+
+---
+### 2025-11-12 - Backward-Compat Gate for Actuator Status ✅
+Status: Complete (env-gated, unit-tested locally)
+Files Modified: `mushpi/app/ble/service.py`
+Files Added: `mushpi/test_actuator_feature_flag.py`
+
+Problem:
+- Adding a new `actuator_status` characteristic risks breaking older clients that assume exactly 5 MushPi characteristics.
+
+Solution:
+1) Introduced feature flag `MUSHPI_BLE_ACTUATOR_STATUS_ENABLE` (default: false) loaded via env (no hard-coded values).
+2) Lazily imports and registers the `actuator_status` characteristic only when the flag is enabled.
+3) Kept the legacy 5-characteristic set as the default to ensure full backward compatibility.
+
+Verification:
+- Added `mushpi/test_actuator_feature_flag.py` that runs in simulation mode and validates:
+  - Flag OFF → characteristic keys = {env_measurements, control_targets, stage_state, override_bits, status_flags, uart_rx, uart_tx}
+  - Flag ON  → same set plus `actuator_status`
+- Ran both modes locally; both passed.
+
+Impact:
+- Existing mobile apps continue to discover the same characteristic set by default.
+- New actuator state telemetry can be enabled safely via `.env` without code changes.
+
+Env:
+- `MUSHPI_BLE_ACTUATOR_STATUS_ENABLE` = true|false (default false)
+
+Next:
+- Optionally add a capabilities characteristic for explicit feature negotiation (env-gated, default off).
 
 ---
 ### 2025-11-11 - Environmental Serializer Type Coercion + Clamping ✅

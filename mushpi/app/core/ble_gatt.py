@@ -34,11 +34,15 @@ from typing import Optional, Dict, Any, Callable
 from ..models.ble_dataclasses import (
     OverrideBits, StatusFlags, EnvironmentalData, ControlTargets, StageStateData,
     ENV_MEASUREMENTS_UUID, CONTROL_TARGETS_UUID, STAGE_STATE_UUID,
-    OVERRIDE_BITS_UUID, STATUS_FLAGS_UUID
+    OVERRIDE_BITS_UUID, STATUS_FLAGS_UUID, ACTUATOR_STATUS_UUID
 )
 from ..ble.service import BLEGATTServiceManager, BLEServiceError
 from ..ble.connection_manager import ConnectionManager
 from .config import config
+from ..ble.characteristics.config_version import ConfigVersionCharacteristic
+from ..ble.characteristics.config_ctrl import ConfigControlCharacteristic
+from ..ble.characteristics.config_in import ConfigInCharacteristic
+from ..ble.characteristics.config_out import ConfigOutCharacteristic
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +53,10 @@ __all__ = [
     'BLEGATTService',  # Backward compatible wrapper
     # Original UUIDs
     'ENV_MEASUREMENTS_UUID', 'CONTROL_TARGETS_UUID', 'STAGE_STATE_UUID',
-    'OVERRIDE_BITS_UUID', 'STATUS_FLAGS_UUID',
+    'OVERRIDE_BITS_UUID', 'STATUS_FLAGS_UUID', 'ACTUATOR_STATUS_UUID',
     # Original API functions
     'initialize_ble_service', 'start_ble_service', 'stop_ble_service',
-    'notify_env_packet', 'update_status_flags', 'set_callbacks',
+    'notify_env_packet', 'notify_actuator_status', 'update_status_flags', 'set_callbacks',
     'is_service_running', 'get_connection_count'
 ]
 
@@ -88,16 +92,64 @@ class BLEGATTService:
         self.stage_data = StageStateData.create_empty()
         self.override_bits = 0
         self.status_flags = StatusFlags.SIMULATION if self.config.development.simulation_mode else 0
+        # Config BLE extended state (no heavy caching here). Use simple assignments (Python 3.10 safe).
+        self._config_version_char = None  # type: Optional[ConfigVersionCharacteristic]
+        self._config_ctrl_char = None     # type: Optional[ConfigControlCharacteristic]
+        self._config_in_char = None       # type: Optional[ConfigInCharacteristic]
+        self._config_out_char = None      # type: Optional[ConfigOutCharacteristic]
         
         # Callbacks for data updates (set by main application)
-        self.get_sensor_data: Optional[Callable] = None
-        self.get_control_data: Optional[Callable] = None
-        self.get_stage_data: Optional[Callable] = None
-        self.set_control_targets: Optional[Callable] = None
-        self.set_stage_state: Optional[Callable] = None
-        self.apply_overrides: Optional[Callable] = None
+        self.get_sensor_data = None        # type: Optional[Callable]
+        self.get_control_data = None       # type: Optional[Callable]  # Relay states
+        self.get_control_targets = None    # type: Optional[Callable]  # Thresholds
+        self.get_stage_data = None         # type: Optional[Callable]
+        self.set_control_targets = None    # type: Optional[Callable]
+        self.set_stage_state = None        # type: Optional[Callable]
+        self.apply_overrides = None        # type: Optional[Callable]
+        self.get_stage_thresholds = None   # type: Optional[Callable]
+        self.set_stage_thresholds = None   # type: Optional[Callable]
         
         self._running = False
+
+    # ------------------------------------------------------------------
+    # Helper methods for new configuration characteristics
+    # ------------------------------------------------------------------
+    def get_config_version(self) -> Optional[Dict[str, Any]]:
+        """Return current config version metadata if characteristic active.
+
+        Returns:
+            Dict with version metadata or None if unavailable.
+        """
+        try:
+            if self._config_version_char and hasattr(self._config_version_char, 'current_version'):
+                ver = self._config_version_char.current_version
+                if ver:
+                    return {
+                        'hash': ver.hash_hex,
+                        'size': ver.size,
+                        'modified': ver.last_modified,
+                        'bytes': ver.version_bytes.hex() if ver.version_bytes else None
+                    }
+        except Exception as e:
+            logger.debug(f"get_config_version failed: {e}")
+        return None
+
+    def request_config_get(self) -> bool:
+        """Initiate a config GET sequence via control characteristic.
+
+        Sends HELLO then GET if control/out characteristics are present.
+        Returns:
+            True if request sent, False otherwise.
+        """
+        try:
+            if self._config_ctrl_char and self._config_out_char:
+                # Emulate BLE writes to control characteristic
+                self._config_ctrl_char._handle_write(b'{"op":"HELLO"}', {})
+                self._config_ctrl_char._handle_write(b'{"op":"GET"}', {})
+                return True
+        except Exception as e:
+            logger.debug(f"request_config_get failed: {e}")
+        return False
         
     def initialize(self) -> bool:
         """Initialize BLE adapter and service
@@ -106,14 +158,14 @@ class BLEGATTService:
             True if initialization successful, False otherwise
         """
         try:
-            # Initialize connection manager
-            if not self.connection_manager.initialize():
-                logger.warning("Connection manager initialization failed")
-            
-            # Initialize service manager
+            # Initialize service manager first to obtain adapter
             success = self.service_manager.initialize()
             
             if success:
+                # Now that adapter is available, initialize connection manager
+                if not self.connection_manager.initialize(self.service_manager.adapter):
+                    logger.warning("Connection manager initialization failed")
+                
                 # Set up callbacks in service manager
                 self._setup_service_callbacks()
                 
@@ -205,6 +257,14 @@ class BLEGATTService:
             
         except Exception as e:
             logger.error(f"Error updating status flags: {e}")
+
+    def notify_actuator_status(self):
+        """Notify clients with current actuator ON/OFF state bits"""
+        try:
+            connected_devices = self.connection_manager.get_connected_devices()
+            self.service_manager.notify_actuator_status(connected_devices)
+        except Exception as e:
+            logger.error(f"Error notifying actuator status: {e}")
     
     def update_advertising_name(self):
         """Update BLE advertising name based on current stage"""
@@ -237,6 +297,8 @@ class BLEGATTService:
             callbacks['get_sensor_data'] = self.get_sensor_data
         if self.get_control_data:
             callbacks['get_control_data'] = self.get_control_data
+        if self.get_control_targets:
+            callbacks['get_control_targets'] = self.get_control_targets
         if self.get_stage_data:
             callbacks['get_stage_data'] = self.get_stage_data
         if self.set_control_targets:
@@ -245,6 +307,10 @@ class BLEGATTService:
             callbacks['set_stage_state'] = self.set_stage_state
         if self.apply_overrides:
             callbacks['apply_overrides'] = self.apply_overrides
+        if self.get_stage_thresholds:
+            callbacks['get_stage_thresholds'] = self.get_stage_thresholds
+        if self.set_stage_thresholds:
+            callbacks['set_stage_thresholds'] = self.set_stage_thresholds
             
         if callbacks:
             self.service_manager.set_callbacks(callbacks)
@@ -256,6 +322,11 @@ class BLEGATTService:
         self.characteristics = {
             name: char for name, char in service_chars.items()
         }
+        # Capture config characteristic references for quick access
+        self._config_version_char = service_chars.get('config_version')
+        self._config_ctrl_char = service_chars.get('config_ctrl')
+        self._config_in_char = service_chars.get('config_in')
+        self._config_out_char = service_chars.get('config_out')
     
     def _on_device_connected(self, device_address: str, connected_set: set):
         """Handle device connection event
@@ -374,21 +445,38 @@ def update_status_flags(flags: StatusFlags):
         logger.error(f"Error in update_status_flags: {e}")
 
 
+def notify_actuator_status():
+    """Notify clients with current actuator ON/OFF state bits (public API)"""
+    global _ble_service
+
+    try:
+        if _ble_service and _ble_service.is_running():
+            _ble_service.notify_actuator_status()
+    except Exception as e:
+        logger.error(f"Error in notify_actuator_status: {e}")
+
+
 def set_callbacks(get_sensor_data: Optional[Callable] = None,
                  get_control_data: Optional[Callable] = None,
+                 get_control_targets: Optional[Callable] = None,
                  get_stage_data: Optional[Callable] = None,
                  set_control_targets: Optional[Callable] = None,
                  set_stage_state: Optional[Callable] = None,
-                 apply_overrides: Optional[Callable] = None):
+                 apply_overrides: Optional[Callable] = None,
+                 get_stage_thresholds: Optional[Callable] = None,
+                 set_stage_thresholds: Optional[Callable] = None):
     """Set callback functions for data access (public API)
     
     Args:
         get_sensor_data: Function to get current sensor data
-        get_control_data: Function to get current control data
+        get_control_data: Function to get current control data (relay states)
+        get_control_targets: Function to get current control thresholds
         get_stage_data: Function to get current stage data
         set_control_targets: Function to set new control targets
         set_stage_state: Function to set new stage state
         apply_overrides: Function to apply override settings
+        get_stage_thresholds: Function to get thresholds for any species/stage
+        set_stage_thresholds: Function to set thresholds for any species/stage
     """
     global _ble_service
     
@@ -401,6 +489,8 @@ def set_callbacks(get_sensor_data: Optional[Callable] = None,
             _ble_service.get_sensor_data = get_sensor_data
         if get_control_data:
             _ble_service.get_control_data = get_control_data
+        if get_control_targets:
+            _ble_service.get_control_targets = get_control_targets
         if get_stage_data:
             _ble_service.get_stage_data = get_stage_data
         if set_control_targets:
@@ -409,6 +499,10 @@ def set_callbacks(get_sensor_data: Optional[Callable] = None,
             _ble_service.set_stage_state = set_stage_state
         if apply_overrides:
             _ble_service.apply_overrides = apply_overrides
+        if get_stage_thresholds:
+            _ble_service.get_stage_thresholds = get_stage_thresholds
+        if set_stage_thresholds:
+            _ble_service.set_stage_thresholds = set_stage_thresholds
             
         # Update service manager callbacks if already initialized
         if hasattr(_ble_service, 'service_manager'):

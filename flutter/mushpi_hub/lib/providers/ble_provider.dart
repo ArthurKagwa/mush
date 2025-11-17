@@ -6,9 +6,11 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:drift/drift.dart';
 import 'package:mushpi_hub/data/repositories/ble_repository.dart';
 import 'package:mushpi_hub/data/database/app_database.dart';
+import 'package:mushpi_hub/core/constants/ble_constants.dart';
 import 'package:mushpi_hub/core/utils/ble_serializer.dart';
 import 'package:mushpi_hub/providers/database_provider.dart';
 import 'dart:developer' as developer;
+import 'dart:convert';
 
 /// BLE Repository provider - manages the BLERepository instance
 ///
@@ -57,16 +59,14 @@ final bleRepositoryProvider = Provider<BLERepository>((ref) {
 /// );
 /// ```
 final bleScanStateProvider =
-    StateNotifierProvider<BLEScanNotifier, AsyncValue<List<ScanResult>>>(
-        (ref) {
+    StateNotifierProvider<BLEScanNotifier, AsyncValue<List<ScanResult>>>((ref) {
   final bleRepository = ref.watch(bleRepositoryProvider);
   return BLEScanNotifier(bleRepository);
 });
 
 /// Notifier for BLE scan state management
 class BLEScanNotifier extends StateNotifier<AsyncValue<List<ScanResult>>> {
-  BLEScanNotifier(this._bleRepository)
-      : super(const AsyncValue.data([])) {
+  BLEScanNotifier(this._bleRepository) : super(const AsyncValue.data([])) {
     _init();
   }
 
@@ -97,7 +97,8 @@ class BLEScanNotifier extends StateNotifier<AsyncValue<List<ScanResult>>> {
   }
 
   /// Start scanning for BLE devices
-  Future<void> startScan({Duration timeout = const Duration(seconds: 10)}) async {
+  Future<void> startScan(
+      {Duration timeout = const Duration(seconds: 10)}) async {
     if (_isScanning) {
       developer.log(
         'Scan already in progress',
@@ -111,12 +112,12 @@ class BLEScanNotifier extends StateNotifier<AsyncValue<List<ScanResult>>> {
         'Starting BLE scan with ${timeout.inSeconds}s timeout',
         name: 'mushpi.providers.ble.scan',
       );
-      
+
       state = const AsyncValue.loading();
       _isScanning = true;
-      
+
       await _bleRepository.startScan(timeout: timeout);
-      
+
       _isScanning = false;
     } catch (error, stackTrace) {
       developer.log(
@@ -126,7 +127,7 @@ class BLEScanNotifier extends StateNotifier<AsyncValue<List<ScanResult>>> {
         stackTrace: stackTrace,
         level: 1000,
       );
-      
+
       _isScanning = false;
       state = AsyncValue.error(error, stackTrace);
     }
@@ -143,7 +144,7 @@ class BLEScanNotifier extends StateNotifier<AsyncValue<List<ScanResult>>> {
         'Stopping BLE scan',
         name: 'mushpi.providers.ble.scan',
       );
-      
+
       await _bleRepository.stopScan();
       _isScanning = false;
     } catch (error, stackTrace) {
@@ -249,7 +250,7 @@ final bleOperationsProvider = Provider<BLEOperations>((ref) {
   final devicesDao = ref.watch(devicesDaoProvider);
   final readingsDao = ref.watch(readingsDaoProvider);
   final settingsDao = ref.watch(settingsDaoProvider);
-  
+
   return BLEOperations(
     repository: bleRepository,
     devicesDao: devicesDao,
@@ -315,7 +316,8 @@ class BLEOperations {
   /// [farmId] - Optional farm ID to associate with this device
   Future<void> connect(BluetoothDevice device, {String? farmId}) async {
     try {
-      debugPrint('🔗 [BLEOperations] Connecting to device: ${device.platformName} (${device.remoteId})');
+      debugPrint(
+          '🔗 [BLEOperations] Connecting to device: ${device.platformName} (${device.remoteId})');
       developer.log(
         'Connecting to device: ${device.platformName} (${device.remoteId})',
         name: 'mushpi.providers.ble.ops',
@@ -325,8 +327,9 @@ class BLEOperations {
       // This ensures auto-reconnect will work even if connection fails
       final deviceId = device.remoteId.toString();
       final deviceAddress = device.remoteId.toString();
-      
-      debugPrint('💾 [BLEOperations] Saving device info for auto-reconnect BEFORE connection...');
+
+      debugPrint(
+          '💾 [BLEOperations] Saving device info for auto-reconnect BEFORE connection...');
       try {
         await settingsDao.setLastConnectedDevice(
           deviceId: deviceId,
@@ -335,7 +338,8 @@ class BLEOperations {
         );
         debugPrint('✅ [BLEOperations] Device info saved for auto-reconnect');
       } catch (e) {
-        debugPrint('⚠️ [BLEOperations] Failed to save device info (non-critical): $e');
+        debugPrint(
+            '⚠️ [BLEOperations] Failed to save device info (non-critical): $e');
         // Non-critical error, continue with connection
       }
 
@@ -351,9 +355,9 @@ class BLEOperations {
 
       if (exists) {
         // Update last connected timestamp
-  await devicesDao.updateLastConnected(deviceId, DateTime.now());
+        await devicesDao.updateLastConnected(deviceId, DateTime.now());
         debugPrint('✅ [BLEOperations] Updated lastConnected timestamp');
-        
+
         // Link to farm if farmId provided
         if (farmId != null) {
           await devicesDao.linkDeviceToFarm(deviceId, farmId);
@@ -373,7 +377,8 @@ class BLEOperations {
         debugPrint('✅ [BLEOperations] Inserted new device record');
       }
 
-      debugPrint('✅ [BLEOperations] Successfully connected to device and updated database');
+      debugPrint(
+          '✅ [BLEOperations] Successfully connected to device and updated database');
       developer.log(
         'Successfully connected to device',
         name: 'mushpi.providers.ble.ops',
@@ -436,7 +441,31 @@ class BLEOperations {
   /// Read control targets from the device
   Future<ControlTargetsData?> readControlTargets() async {
     try {
-      return await repository.readControlTargets();
+      final data = await repository.readControlTargets();
+      // Cache last-known control targets for offline display
+      try {
+        final json = {
+          'tempMin': data.tempMin,
+          'tempMax': data.tempMax,
+          'rhMin': data.rhMin,
+          'co2Max': data.co2Max,
+          'lightMode': data.lightMode.value,
+          'onMinutes': data.onMinutes,
+          'offMinutes': data.offMinutes,
+          'ts': DateTime.now().toIso8601String(),
+        };
+        await settingsDao.setValue(
+            'last_control_targets_json', jsonEncode(json));
+      } catch (e, st) {
+        developer.log(
+          'Failed to cache control targets',
+          name: 'mushpi.providers.ble.ops',
+          error: e,
+          stackTrace: st,
+          level: 900,
+        );
+      }
+      return data;
     } catch (error, stackTrace) {
       developer.log(
         'Error reading control targets',
@@ -453,7 +482,7 @@ class BLEOperations {
   Future<void> writeControlTargets(ControlTargetsData data) async {
     try {
       await repository.writeControlTargets(data);
-      
+
       developer.log(
         'Successfully wrote control targets',
         name: 'mushpi.providers.ble.ops',
@@ -490,7 +519,7 @@ class BLEOperations {
   Future<void> writeStageState(StageStateData data) async {
     try {
       await repository.writeStageState(data);
-      
+
       developer.log(
         'Successfully wrote stage state',
         name: 'mushpi.providers.ble.ops',
@@ -507,11 +536,61 @@ class BLEOperations {
     }
   }
 
+  /// Read stage thresholds for a specific species and stage
+  Future<StageThresholdsData?> readStageThresholds(
+    Species species,
+    GrowthStage stage,
+  ) async {
+    try {
+      return await repository.readStageThresholds(species, stage);
+    } catch (error, stackTrace) {
+      developer.log(
+        'Error reading stage thresholds',
+        name: 'mushpi.providers.ble.ops',
+        error: error,
+        stackTrace: stackTrace,
+        level: 1000,
+      );
+      return null;
+    }
+  }
+
+  /// Write stage thresholds for a specific species and stage
+  Future<bool> writeStageThresholds(StageThresholdsData data) async {
+    try {
+      final success = await repository.writeStageThresholds(data);
+
+      if (success) {
+        developer.log(
+          'Successfully wrote stage thresholds',
+          name: 'mushpi.providers.ble.ops',
+        );
+      } else {
+        developer.log(
+          'Failed to write stage thresholds (validation failed)',
+          name: 'mushpi.providers.ble.ops',
+          level: 900,
+        );
+      }
+
+      return success;
+    } catch (error, stackTrace) {
+      developer.log(
+        'Error writing stage thresholds',
+        name: 'mushpi.providers.ble.ops',
+        error: error,
+        stackTrace: stackTrace,
+        level: 1000,
+      );
+      return false;
+    }
+  }
+
   /// Write override bits to the device
   Future<void> writeOverrideBits(int bits) async {
     try {
       await repository.writeOverrideBits(bits);
-      
+
       developer.log(
         'Successfully wrote override bits: 0x${bits.toRadixString(16)}',
         name: 'mushpi.providers.ble.ops',

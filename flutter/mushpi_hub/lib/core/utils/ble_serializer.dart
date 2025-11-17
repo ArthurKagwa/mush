@@ -1,15 +1,16 @@
+import 'dart:developer' as developer;
 import 'dart:typed_data';
 import '../constants/ble_constants.dart';
 
 /// BLE Data Serialization Utilities
-/// 
+///
 /// Handles binary packing and unpacking for all BLE GATT characteristics.
 /// All data uses little-endian byte order to match the MushPi Python implementation.
 class BLEDataSerializer {
   BLEDataSerializer._();
 
   /// Parse environmental measurements (12 bytes)
-  /// 
+  ///
   /// Format (little-endian):
   /// - Bytes 0-1: CO₂ ppm (unsigned 16-bit)
   /// - Bytes 2-3: Temperature × 10 (signed 16-bit, divide by 10 for °C)
@@ -36,7 +37,7 @@ class BLEDataSerializer {
   }
 
   /// Serialize control targets (15 bytes)
-  /// 
+  ///
   /// Format (little-endian):
   /// - Bytes 0-1: Temperature min × 10 (signed 16-bit)
   /// - Bytes 2-3: Temperature max × 10 (signed 16-bit)
@@ -83,7 +84,7 @@ class BLEDataSerializer {
   }
 
   /// Serialize stage state (10 bytes)
-  /// 
+  ///
   /// Format (little-endian):
   /// - Byte 0: Mode (unsigned 8-bit): 0=FULL, 1=SEMI, 2=MANUAL
   /// - Byte 1: Species ID (unsigned 8-bit): 1=Oyster, 2=Shiitake, 3=Lion's Mane, 99=Custom
@@ -118,10 +119,26 @@ class BLEDataSerializer {
 
     final buffer = ByteData.sublistView(Uint8List.fromList(data));
 
+    final modeId = buffer.getUint8(0);
+    final speciesId = buffer.getUint8(1);
+    final stageId = buffer.getUint8(2);
+
+    developer.log(
+      '📥 STAGE STATE PARSE: Raw byte[0]=$modeId (0=FULL, 1=SEMI, 2=MANUAL)',
+      name: 'BLEDataSerializer.parseStageState',
+    );
+
+    final parsedMode = ControlMode.fromId(modeId);
+
+    developer.log(
+      '🔍 MODE MAPPING: modeId=$modeId → ${parsedMode.name} (displayName="${parsedMode.displayName}")',
+      name: 'BLEDataSerializer.parseStageState',
+    );
+
     return StageStateData(
-      mode: ControlMode.fromId(buffer.getUint8(0)),
-      species: Species.fromId(buffer.getUint8(1)),
-      stage: GrowthStage.fromId(buffer.getUint8(2)),
+      mode: parsedMode,
+      species: Species.fromId(speciesId),
+      stage: GrowthStage.fromId(stageId),
       stageStartTime: DateTime.fromMillisecondsSinceEpoch(
         buffer.getUint32(3, Endian.little) * 1000,
       ),
@@ -130,7 +147,7 @@ class BLEDataSerializer {
   }
 
   /// Serialize override bits (2 bytes)
-  /// 
+  ///
   /// Format (little-endian):
   /// - Bytes 0-1: Override bits (unsigned 16-bit bit field)
   /// - Bit 0: LIGHT override
@@ -145,7 +162,7 @@ class BLEDataSerializer {
   }
 
   /// Parse status flags (4 bytes)
-  /// 
+  ///
   /// Format (little-endian):
   /// - Bytes 0-3: Status flags (unsigned 32-bit bit field)
   /// - Bit 0: SENSOR_ERROR - Sensor read failure
@@ -159,10 +176,23 @@ class BLEDataSerializer {
   /// - Bit 9: HEATER_ON - Heater relay ON
   /// - Bit 7: SIMULATION - Device in simulation mode
   static int parseStatusFlags(List<int> data) {
-    if (data.length != BLEConstants.statusDataSize) {
-      throw ArgumentError(
-        'Status flags data must be exactly ${BLEConstants.statusDataSize} bytes, got ${data.length}',
+    // Handle invalid data gracefully - return 0x0000 (all flags disabled)
+    if (data.isEmpty) {
+      developer.log(
+        '⚠️ Status flags: empty data received, returning default 0x0000',
+        name: 'BLEDataSerializer.parseStatusFlags',
       );
+      return 0x0000;
+    }
+
+    if (data.length != BLEConstants.statusDataSize) {
+      developer.log(
+        '⚠️ Status flags: invalid length ${data.length} bytes '
+        '(expected ${BLEConstants.statusDataSize}), returning default 0x0000',
+        name: 'BLEDataSerializer.parseStatusFlags',
+        level: 900, // WARNING
+      );
+      return 0x0000;
     }
 
     final buffer = ByteData.sublistView(Uint8List.fromList(data));
@@ -275,5 +305,188 @@ class StageStateData {
         'species: ${species.displayName}, '
         'stage: ${stage.displayName}, '
         'day: $daysInStage/$expectedDays)';
+  }
+}
+
+/// Stage thresholds data class
+///
+/// Represents threshold configuration for a specific species/stage combination.
+/// JSON format for BLE communication with stage_thresholds characteristic.
+class StageThresholdsData {
+  final Species species;
+  final GrowthStage stage;
+  final double? tempMin;
+  final double? tempMax;
+  final double? rhMin;
+  final double? rhMax;
+  final int? co2Max;
+  final LightMode? lightMode;
+  final int? lightOnMinutes;
+  final int? lightOffMinutes;
+  final int? expectedDays;
+
+  const StageThresholdsData({
+    required this.species,
+    required this.stage,
+    this.tempMin,
+    this.tempMax,
+    this.rhMin,
+    this.rhMax,
+    this.co2Max,
+    this.lightMode,
+    this.lightOnMinutes,
+    this.lightOffMinutes,
+    this.expectedDays,
+  });
+
+  /// Create from JSON (BLE read response)
+  factory StageThresholdsData.fromJson(Map<String, dynamic> json) {
+    // Parse species
+    final speciesStr = json['species'] as String?;
+    final species = Species.values.firstWhere(
+      (s) => s.displayName.toLowerCase() == speciesStr?.toLowerCase(),
+      orElse: () => Species.oyster,
+    );
+
+    // Parse stage
+    final stageStr = json['stage'] as String?;
+    final stage = GrowthStage.values.firstWhere(
+      (s) => s.displayName.toLowerCase() == stageStr?.toLowerCase(),
+      orElse: () => GrowthStage.incubation,
+    );
+
+    // Parse light settings
+    LightMode? lightMode;
+    int? lightOnMinutes;
+    int? lightOffMinutes;
+    if (json.containsKey('light') && json['light'] is Map) {
+      final lightData = json['light'] as Map<String, dynamic>;
+      final modeStr = lightData['mode'] as String?;
+      if (modeStr != null) {
+        lightMode = LightMode.values.firstWhere(
+          (m) => m.displayName.toLowerCase() == modeStr.toLowerCase(),
+          orElse: () => LightMode.off,
+        );
+      }
+      // Handle num type from JSON (can be int or double from database)
+      lightOnMinutes = (lightData['on_min'] as num?)?.toInt();
+      lightOffMinutes = (lightData['off_min'] as num?)?.toInt();
+    }
+
+    return StageThresholdsData(
+      species: species,
+      stage: stage,
+      tempMin: (json['temp_min'] as num?)?.toDouble(),
+      tempMax: (json['temp_max'] as num?)?.toDouble(),
+      rhMin: (json['rh_min'] as num?)?.toDouble(),
+      rhMax: (json['rh_max'] as num?)?.toDouble(),
+      // Handle num type from JSON (can be int or double from database)
+      co2Max: (json['co2_max'] as num?)?.toInt(),
+      lightMode: lightMode,
+      lightOnMinutes: lightOnMinutes,
+      lightOffMinutes: lightOffMinutes,
+      expectedDays: (json['expected_days'] as num?)?.toInt(),
+    );
+  }
+
+  /// Convert to JSON (BLE write request)
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{
+      'species': species.displayName,
+      'stage': stage.displayName,
+    };
+
+    if (tempMin != null) json['temp_min'] = tempMin;
+    if (tempMax != null) json['temp_max'] = tempMax;
+    if (rhMin != null) json['rh_min'] = rhMin;
+    if (rhMax != null) json['rh_max'] = rhMax;
+    if (co2Max != null) json['co2_max'] = co2Max;
+    if (expectedDays != null) json['expected_days'] = expectedDays;
+
+    if (lightMode != null ||
+        lightOnMinutes != null ||
+        lightOffMinutes != null) {
+      json['light'] = <String, dynamic>{};
+      if (lightMode != null) {
+        json['light']['mode'] = lightMode!.displayName.toLowerCase();
+      }
+      if (lightOnMinutes != null) json['light']['on_min'] = lightOnMinutes;
+      if (lightOffMinutes != null) json['light']['off_min'] = lightOffMinutes;
+    }
+
+    return json;
+  }
+
+  /// Create query request (species + stage only, for reading)
+  Map<String, dynamic> toQueryJson() {
+    return {
+      'species': species.displayName,
+      'stage': stage.displayName,
+    };
+  }
+
+  /// Validate threshold ranges
+  bool isValid() {
+    if (tempMin != null && tempMax != null && tempMin! >= tempMax!) {
+      return false;
+    }
+    if (tempMin != null && (tempMin! < -20.0 || tempMin! > 60.0)) return false;
+    if (tempMax != null && (tempMax! < -20.0 || tempMax! > 60.0)) return false;
+    if (rhMin != null && (rhMin! < 0.0 || rhMin! > 100.0)) return false;
+    if (rhMax != null && (rhMax! < 0.0 || rhMax! > 100.0)) return false;
+    if (co2Max != null && (co2Max! < 0 || co2Max! > 10000)) return false;
+    if (lightMode == LightMode.cycle) {
+      if (lightOnMinutes == null ||
+          lightOffMinutes == null ||
+          lightOnMinutes! <= 0 ||
+          lightOffMinutes! <= 0) {
+        return false;
+      }
+    }
+    if (expectedDays != null && (expectedDays! < 0 || expectedDays! > 365)) {
+      return false;
+    }
+    return true;
+  }
+
+  /// Create a copy with updated fields
+  StageThresholdsData copyWith({
+    Species? species,
+    GrowthStage? stage,
+    double? tempMin,
+    double? tempMax,
+    double? rhMin,
+    double? rhMax,
+    int? co2Max,
+    LightMode? lightMode,
+    int? lightOnMinutes,
+    int? lightOffMinutes,
+    int? expectedDays,
+  }) {
+    return StageThresholdsData(
+      species: species ?? this.species,
+      stage: stage ?? this.stage,
+      tempMin: tempMin ?? this.tempMin,
+      tempMax: tempMax ?? this.tempMax,
+      rhMin: rhMin ?? this.rhMin,
+      rhMax: rhMax ?? this.rhMax,
+      co2Max: co2Max ?? this.co2Max,
+      lightMode: lightMode ?? this.lightMode,
+      lightOnMinutes: lightOnMinutes ?? this.lightOnMinutes,
+      lightOffMinutes: lightOffMinutes ?? this.lightOffMinutes,
+      expectedDays: expectedDays ?? this.expectedDays,
+    );
+  }
+
+  @override
+  String toString() {
+    return 'StageThresholds('
+        'species: ${species.displayName}, '
+        'stage: ${stage.displayName}, '
+        'temp: ${tempMin ?? "??"}-${tempMax ?? "??"}°C, '
+        'rh: ${rhMin ?? "??"}${rhMax != null ? "-$rhMax" : "+"}%, '
+        'co2: <${co2Max ?? "??"}ppm, '
+        'light: ${lightMode?.displayName ?? "??"}${lightMode == LightMode.cycle ? " (${lightOnMinutes ?? 0}m/${lightOffMinutes ?? 0}m)" : ""}, '
+        'days: ${expectedDays ?? "??"})';
   }
 }

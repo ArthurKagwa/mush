@@ -26,6 +26,10 @@ class ControlScreen extends ConsumerStatefulWidget {
 }
 
 class _ControlScreenState extends ConsumerState<ControlScreen> {
+  // Current stage info
+  Species? _currentSpecies;
+  GrowthStage? _currentStage;
+
   // Form state
   double _tempMin = 20.0;
   double _tempMax = 26.0;
@@ -34,7 +38,8 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
   LightMode _lightMode = LightMode.off;
   int _onMinutes = 960; // 16 hours
   int _offMinutes = 480; // 8 hours
-  
+  int? _expectedDays; // Track expected days from stage thresholds
+
   // Override bits
   bool _lightOverride = false;
   bool _fanOverride = false;
@@ -66,6 +71,51 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
 
     try {
       final bleOps = ref.read(bleOperationsProvider);
+
+      // Load current stage first
+      final stageState = await bleOps.readStageState();
+      if (stageState != null) {
+        setState(() {
+          _currentSpecies = stageState.species;
+          _currentStage = stageState.stage;
+        });
+
+        developer.log(
+          '✅ Loaded current stage: ${stageState.species.displayName} - ${stageState.stage.displayName}',
+          name: 'mushpi.control_screen',
+        );
+
+        // Load stage thresholds for current stage
+        final thresholds = await bleOps.readStageThresholds(
+          stageState.species,
+          stageState.stage,
+        );
+
+        if (thresholds != null) {
+          // Use stage thresholds as initial values
+          setState(() {
+            if (thresholds.tempMin != null) _tempMin = thresholds.tempMin!;
+            if (thresholds.tempMax != null) _tempMax = thresholds.tempMax!;
+            if (thresholds.rhMin != null) _rhMin = thresholds.rhMin!;
+            if (thresholds.co2Max != null) _co2Max = thresholds.co2Max!;
+            if (thresholds.lightMode != null)
+              _lightMode = thresholds.lightMode!;
+            if (thresholds.lightOnMinutes != null)
+              _onMinutes = thresholds.lightOnMinutes!;
+            if (thresholds.lightOffMinutes != null)
+              _offMinutes = thresholds.lightOffMinutes!;
+            if (thresholds.expectedDays != null)
+              _expectedDays = thresholds.expectedDays!;
+          });
+
+          developer.log(
+            '✅ Loaded stage thresholds for current stage (expectedDays: $_expectedDays)',
+            name: 'mushpi.control_screen',
+          );
+        }
+      }
+
+      // Load current control targets (actual applied values)
       final controlTargets = await bleOps.readControlTargets();
 
       if (controlTargets != null) {
@@ -111,7 +161,8 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
       return;
     }
 
-    if (_lightMode == LightMode.cycle && (_onMinutes <= 0 || _offMinutes <= 0)) {
+    if (_lightMode == LightMode.cycle &&
+        (_onMinutes <= 0 || _offMinutes <= 0)) {
       setState(() {
         _errorMessage = 'Light cycle times must be greater than 0';
       });
@@ -145,8 +196,43 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
         name: 'mushpi.control_screen',
       );
 
+      // Write stage thresholds for current stage (if known)
+      if (_currentSpecies != null && _currentStage != null) {
+        final thresholds = StageThresholdsData(
+          species: _currentSpecies!,
+          stage: _currentStage!,
+          tempMin: _tempMin,
+          tempMax: _tempMax,
+          rhMin: _rhMin,
+          co2Max: _co2Max,
+          lightMode: _lightMode,
+          lightOnMinutes: _onMinutes,
+          lightOffMinutes: _offMinutes,
+          expectedDays: _expectedDays,
+        );
+
+        final thresholdSuccess = await bleOps.writeStageThresholds(thresholds);
+
+        if (thresholdSuccess) {
+          developer.log(
+            '✅ Applied stage thresholds for ${_currentSpecies!.displayName} - ${_currentStage!.displayName}',
+            name: 'mushpi.control_screen',
+          );
+        } else {
+          developer.log(
+            '⚠️ Failed to write stage thresholds (validation failed)',
+            name: 'mushpi.control_screen',
+            level: 900,
+          );
+        }
+      }
+
       // Write override bits if any are set
-      if (_lightOverride || _fanOverride || _mistOverride || _heaterOverride || _disableAuto) {
+      if (_lightOverride ||
+          _fanOverride ||
+          _mistOverride ||
+          _heaterOverride ||
+          _disableAuto) {
         int overrideBits = 0;
         if (_lightOverride) overrideBits |= 0x01;
         if (_fanOverride) overrideBits |= 0x02;
@@ -236,7 +322,10 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
                 Icon(
                   Icons.agriculture_outlined,
                   size: 120,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.5),
+                  color: Theme.of(context)
+                      .colorScheme
+                      .onSurfaceVariant
+                      .withOpacity(0.5),
                 ),
                 const SizedBox(height: 24),
                 Text(
@@ -256,7 +345,8 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
         if (farms.length == 1) {
           // Auto-select single farm
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            ref.read(selectedMonitoringFarmIdProvider.notifier).state = farms.first.id;
+            ref.read(selectedMonitoringFarmIdProvider.notifier).state =
+                farms.first.id;
           });
           return const Center(child: CircularProgressIndicator());
         }
@@ -274,7 +364,8 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
                 subtitle: farm.location != null ? Text(farm.location!) : null,
                 trailing: const Icon(Icons.arrow_forward),
                 onTap: () {
-                  ref.read(selectedMonitoringFarmIdProvider.notifier).state = farm.id;
+                  ref.read(selectedMonitoringFarmIdProvider.notifier).state =
+                      farm.id;
                 },
               ),
             );
@@ -293,7 +384,8 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
     return Stack(
       children: [
         SingleChildScrollView(
-          padding: const EdgeInsets.all(16).copyWith(bottom: 88), // Space for FAB
+          padding:
+              const EdgeInsets.all(16).copyWith(bottom: 88), // Space for FAB
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -314,7 +406,9 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
                           child: Text(
                             'Not connected to device. Connect to a farm to adjust settings.',
                             style: TextStyle(
-                              color: Theme.of(context).colorScheme.onErrorContainer,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onErrorContainer,
                             ),
                           ),
                         ),
@@ -322,6 +416,72 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
                     ),
                   ),
                 ),
+
+              // Current Stage Banner
+              if (_currentSpecies != null && _currentStage != null) ...[
+                if (!isConnected) const SizedBox(height: 8),
+                Card(
+                  color: Theme.of(context).colorScheme.secondaryContainer,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.eco,
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSecondaryContainer,
+                          size: 32,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Editing Current Stage',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelMedium
+                                    ?.copyWith(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onSecondaryContainer,
+                                    ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                '${_currentSpecies!.displayName} - ${_currentStage!.displayName}',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .titleLarge
+                                    ?.copyWith(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onSecondaryContainer,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Changes will update thresholds for this stage',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onSecondaryContainer,
+                                    ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
 
               // Success/Error messages
               if (_successMessage != null) ...[
@@ -334,14 +494,17 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
                       children: [
                         Icon(
                           Icons.check_circle,
-                          color: Theme.of(context).colorScheme.onPrimaryContainer,
+                          color:
+                              Theme.of(context).colorScheme.onPrimaryContainer,
                         ),
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
                             _successMessage!,
                             style: TextStyle(
-                              color: Theme.of(context).colorScheme.onPrimaryContainer,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onPrimaryContainer,
                             ),
                           ),
                         ),
@@ -368,7 +531,9 @@ class _ControlScreenState extends ConsumerState<ControlScreen> {
                           child: Text(
                             _errorMessage!,
                             style: TextStyle(
-                              color: Theme.of(context).colorScheme.onErrorContainer,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onErrorContainer,
                             ),
                           ),
                         ),

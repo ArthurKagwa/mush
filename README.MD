@@ -192,6 +192,20 @@ Characteristics:
   * bit0 LIGHT, bit1 FAN, bit2 MIST, bit3 HEATER, bit7 DISABLE\_AUTOMATION
 * `status_flags` (notify/read)
 
+Optional (feature-gated):
+
+* `actuator_status` (read/notify)
+  - 2-byte bitfield of live relay states
+  - Bit 0: Light ON; Bit 1: Fan ON; Bit 2: Mist ON; Bit 3: Heater ON; others reserved
+
+Enable via `.env`:
+
+```
+MUSHPI_BLE_ACTUATOR_STATUS_ENABLE=true
+```
+
+Default is `false` to preserve backward compatibility for clients expecting only the legacy characteristic set.
+
 Advertising name: `MushPi-<species><stage>`; pair once; reject unknown writers.
 
 ---

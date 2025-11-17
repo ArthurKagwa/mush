@@ -1,3 +1,530 @@
+## 2025-11-17 - Stage Configuration Wizard (Multi-Step Form) ✅
+
+**Status**: Complete - Replaced dual-form approach with guided 5-step wizard
+
+**Files Added:**
+- `lib/screens/stage_wizard_screen.dart` (~1490 lines)
+
+**Files Modified:**
+- `lib/screens/stage_screen.dart` (simplified to 17-line wrapper)
+
+**Problem Statement:**
+
+The previous stage configuration screen had a confusing UX:
+1. Two separate forms with separate submit buttons (stage state vs. thresholds)
+2. Users didn't know which button to press or if both were needed
+3. Could only configure one stage at a time
+4. Repetitive work: had to revisit screen each time stage advanced
+5. No overview of complete grow cycle
+
+**Solution: 5-Step Wizard**
+
+A guided multi-step form that configures the entire grow cycle in one flow:
+
+```
+Step 0: Basic Information
+├─ Species (Oyster/Shiitake/Lion's Mane)
+├─ Date Planted
+├─ Current Growth Stage
+└─ Automation Mode
+
+Step 1: Incubation Stage Setup
+├─ Expected Duration
+├─ Temperature Range
+├─ Humidity Minimum
+├─ CO₂ Maximum
+└─ Light Mode & Timing
+
+Step 2: Pinning Stage Setup
+├─ Expected Duration
+├─ Temperature Range
+├─ Humidity Minimum
+├─ CO₂ Maximum
+└─ Light Mode & Timing
+
+Step 3: Fruiting Stage Setup
+├─ Expected Duration
+├─ Temperature Range
+├─ Humidity Minimum
+├─ CO₂ Maximum
+└─ Light Mode & Timing
+
+Step 4: Review & Submit
+├─ Summary of all settings
+├─ Edit buttons to jump back
+└─ Submit All Settings (atomic)
+```
+
+**Key Features:**
+
+1. **Atomic Submission**
+   - Single submit button writes all settings at once:
+     * Current stage state (species, date, mode, current stage)
+     * Incubation thresholds
+     * Pinning thresholds
+     * Fruiting thresholds
+   - All-or-nothing: Either all succeed or all fail
+
+2. **Species-Specific Defaults**
+   - Oyster: 14d/5d/7d (incubation/pinning/fruiting)
+   - Shiitake: 21d/7d/10d
+   - Lion's Mane: 18d/6d/8d
+   - Includes optimal temps, humidity, CO₂, light for each stage
+   - Auto-loaded when species changes
+
+3. **Progress Visualization**
+   - Stepper indicator showing 1/5, 2/5, etc.
+   - Visual progress bar
+   - Tap completed steps to jump back and edit
+
+4. **Data Loading**
+   - On open: Loads current state + all three stage thresholds from device
+   - Falls back to species defaults if BLE read fails
+   - Auto-refreshes on reconnection
+
+5. **Validation**
+   - Client-side validation before submission:
+     * Temperature: 5-35°C, min < max
+     * Humidity: 40-100%
+     * CO₂: 400-5000 ppm
+     * Expected days: 1-365
+     * Light timing: Valid HH:MM for CYCLE mode
+   - Clear error messages show which stage/field has issues
+
+**State Management:**
+
+```dart
+// Wizard progression
+int _currentStep = 0;  // 0-4
+static const int _totalSteps = 5;
+
+// Basic info (Step 0)
+Species _species;
+DateTime _datePlanted;
+ControlMode _mode;
+GrowthStage _currentStage;
+
+// Stage configurations (Steps 1-3)
+Map<GrowthStage, Map<String, dynamic>> _stageConfigs = {
+  GrowthStage.incubation: {...},
+  GrowthStage.pinning: {...},
+  GrowthStage.fruiting: {...},
+};
+
+// Form controllers per stage
+Map<GrowthStage, Map<String, TextEditingController>> _controllers;
+```
+
+**Submission Flow:**
+
+```dart
+Future<void> _submitAllSettings() async {
+  // 1. Validate all stages
+  final error = _validateAllStages();
+  if (error != null) return showError(error);
+
+  // 2. Write stage state
+  await bleOps.writeStageState(currentStageState);
+
+  // 3. Write all three stage thresholds
+  await bleOps.writeStageThresholds(incubationThresholds);
+  await bleOps.writeStageThresholds(pinningThresholds);
+  await bleOps.writeStageThresholds(fruitingThresholds);
+
+  // 4. Navigate back on success
+  Navigator.pop(context);
+}
+```
+
+**Benefits:**
+
+✅ **One-Time Setup**: Configure entire grow cycle upfront
+✅ **Clear Workflow**: Step-by-step, always know where you are
+✅ **No Confusion**: One submit button, clear what it does
+✅ **Complete Configuration**: All stages configured at once
+✅ **Automatic Transitions**: System uses correct thresholds as stages advance
+✅ **Edit Anytime**: Jump back to any step to modify
+✅ **Review Before Submit**: Step 5 shows complete summary
+✅ **Smart Defaults**: Species-specific values pre-filled
+✅ **Validation**: Catches errors before submission
+✅ **Atomic**: All settings applied together or none
+
+**User Workflow Example:**
+
+1. Open Stage screen → Wizard appears
+2. Step 0: Select "Oyster", set date to today, current stage "Incubation", mode "Semi Auto"
+3. Step 1: Review/adjust Incubation defaults (20-24°C, 90% RH, 2000ppm CO₂, Light OFF)
+4. Step 2: Review/adjust Pinning defaults (18-22°C, 95% RH, 1000ppm CO₂, Light CYCLE)
+5. Step 3: Review/adjust Fruiting defaults (16-20°C, 90% RH, 800ppm CO₂, Light CYCLE)
+6. Step 4: Review all settings, make final edits
+7. Submit → All data written to device via BLE
+8. Wizard closes, return to monitoring
+
+When the system advances from Incubation → Pinning → Fruiting (automatically or manually), it uses the pre-configured thresholds. No need to reconfigure!
+
+**Technical Details:**
+
+- Wizard loads existing data on open (editable configuration)
+- Each stage uses dedicated TextEditingControllers
+- Light timing: HH:MM format in UI, converts to/from minutes for BLE
+- Validation per-stage with clear error messages
+- Progress indicator uses Flutter's visual design language
+- Interactive stepper - tap any segment to jump
+
+**Architecture Decision:**
+
+Replaced complex dual-form UI with guided wizard to:
+- Eliminate UX confusion (dual submit buttons)
+- Enable complete upfront configuration
+- Provide clear progress visualization
+- Ensure atomic, validated submissions
+- Support species-specific intelligent defaults
+
+---
+
+## 2025-11-17 - Stage Thresholds Full CRUD via BLE ✅
+
+Status: Complete (full threshold manipulation for any stage, dual-screen UX)
+
+What changed:
+- **New BLE Characteristic**: Added `stageThresholdsUUID` (12345678-1234-5678-1234-56789abcdef9) for reading and writing stage-specific thresholds independently of control targets.
+- **Data Model**: Created `StageThresholdsData` class in `ble_serializer.dart` with JSON serialization:
+  - Fields: `species`, `stage`, `tempMin`, `tempMax`, `rhMin`, `rhMax`, `co2Max`, `lightMode`, `lightOnMinutes`, `lightOffMinutes`, `expectedDays`
+  - `toJson()`: Full update payload with all threshold values
+  - `toQueryJson()`: Minimal query payload (species + stage only)
+  - `fromJson()`: Parses JSON response including nested light settings
+  - `isValid()`: Validates temp_min < temp_max, ranges (5-35°C temp, 40-100% RH, 400-5000ppm CO₂), light cycle timing (HH:MM format)
+  - `copyWith()`: Immutable updates
+- **BLE Protocol**: JSON-based query/update pattern:
+  - **Query (read)**: Send `{"species": "oyster", "stage": "pinning"}`, receive full threshold JSON
+  - **Update (write)**: Send full JSON with species, stage, and all threshold fields
+  - Backend distinguishes query vs update by presence of threshold keys
+- **BLE Repository**: 
+  - Added `_stageThresholdsChar` field with service discovery
+  - `readStageThresholds(Species, GrowthStage)`: Query then read pattern
+  - `writeStageThresholds(StageThresholdsData)`: Validates then writes
+  - Comprehensive logging with 🔍📤📥✅ emojis
+  - Updated discovery to expect 6 characteristics (was 5)
+- **BLE Operations Provider**: Added `readStageThresholds()` and `writeStageThresholds()` wrappers with error handling
+
+### Stage Screen Enhancements
+
+Purpose: Edit thresholds for ANY stage (including future stages like Fruiting while in Incubation)
+
+New Features:
+- **Expandable "Stage Thresholds" section**: Tap to show/hide threshold editing form
+- **Auto-loading**: Thresholds reload when user changes species or stage selection
+- **Form Controls**:
+  - Temperature range (min/max) with 5-35°C validation
+  - Humidity minimum with 40-100% validation
+  - CO₂ maximum with 400-5000 ppm validation
+  - Light mode selector (OFF/ON/CYCLE)
+  - Light timing (HH:MM format) for CYCLE mode
+- **Validation**: Client-side validation before apply (`_validateThresholds()`)
+- **Apply Button**: Only shown when `_hasThresholdChanges = true`, disabled when loading or disconnected
+- **State Management**: Separate `_hasThresholdChanges` flag independent of `_hasChanges` for stage state
+- **Time Format Conversion**: UI uses HH:MM format, converts to/from minutes for backend
+
+Workflow:
+1. User selects species (Oyster/Shiitake/Lion's Mane)
+2. User selects stage (Incubation/Pinning/Fruiting)
+3. Thresholds for selected species+stage automatically load
+4. User taps "Stage Thresholds" header to expand
+5. User edits values, taps "Apply Thresholds"
+6. System validates → writes to BLE → shows success/error message
+
+### Control Screen Enhancements
+
+Purpose: Quick access to CURRENT stage's thresholds with clear indication
+
+New Features:
+- **Current Stage Banner**: Prominent card showing "Editing Current Stage: [Species] - [Stage]"
+  - Displays species icon and stage name
+  - Subtitle: "Changes will update thresholds for this stage"
+  - Color: Secondary container for visual distinction
+- **Automatic Stage Detection**: Loads current stage via `readStageState()` on screen open
+- **Threshold Pre-population**: Loads stage thresholds for current stage as initial values
+- **Dual Write**: "Apply Changes" button now writes BOTH:
+  1. Control targets (immediate control values)
+  2. Stage thresholds (updates thresholds for current stage)
+- **Seamless UX**: Existing controls now edit current stage's thresholds, banner makes this clear
+
+Workflow:
+1. User opens Control Screen
+2. System loads current stage (e.g., "Oyster - Pinning")
+3. System loads thresholds for current stage as initial values
+4. Banner displays "Editing Current Stage: Oyster - Pinning"
+5. User adjusts sliders/controls
+6. User taps "Apply Changes"
+7. System writes both control targets AND stage thresholds
+
+### Validation Rules
+
+Implemented in both screens:
+- **Temperature**: Min < Max, range 5-35°C
+- **Humidity**: 40-100%
+- **CO₂**: 400-5000 ppm
+- **Light Timing (CYCLE mode)**: 
+  - Format: HH:MM (e.g., 08:00)
+  - Hours: 0-23, Minutes: 0-59
+  - Both on_time and off_time required
+
+### Error Handling
+
+- JSON parse errors: Returns null, logs error
+- Backend error responses: Checks for `{"error": "..."}` in JSON
+- Validation failures: Returns false, logs warning
+- Network errors: Catches exceptions, displays user-friendly messages
+- Missing characteristic: Throws BLEException during discovery
+
+### Backend Integration
+
+Pi-side implementation (already exists):
+- `mushpi/app/ble/characteristics/stage_thresholds.py`
+- UUID: 12345678-1234-5678-1234-56789abcdef9
+- Database-backed: Stores in `stage_thresholds` table with species/stage keys
+- JSON protocol: Distinguishes query vs update by checking for threshold keys
+- Callbacks: `get_callback(species, stage)` and `set_callback(species, stage, thresholds)`
+
+### Files Modified
+
+- `lib/core/constants/ble_constants.dart`: Added `stageThresholdsUUID`
+- `lib/core/utils/ble_serializer.dart`: Added `StageThresholdsData` class (~180 lines)
+- `lib/data/repositories/ble_repository.dart`: Added characteristic discovery and read/write methods (~140 lines)
+- `lib/providers/ble_provider.dart`: Added BLE operations wrappers (~65 lines), added import for ble_constants
+- `lib/screens/stage_screen.dart`: Added threshold state, loading, validation, and expandable UI section (~350 lines)
+- `lib/screens/control_screen.dart`: Added current stage banner and dual write logic (~80 lines)
+
+### Benefits
+
+1. **Flexibility**: Edit thresholds for future stages without changing current stage
+2. **Clarity**: Control Screen clearly indicates which stage is being edited
+3. **Persistence**: Thresholds stored per species+stage combination
+4. **Validation**: Client-side validation prevents invalid values from reaching backend
+5. **Consistency**: Both screens use same BLE protocol and data model
+6. **Modularity**: Clean separation between control targets (immediate) and stage thresholds (persistent)
+
+### Testing Recommendations
+
+1. **Query Operations**: Test reading thresholds for all species/stage combinations
+2. **Update Operations**: Test writing thresholds, verify persistence across app restarts
+3. **Validation**: Test all validation edge cases (temp_min >= temp_max, invalid ranges, malformed times)
+4. **Error Handling**: Test with invalid species/stage, malformed JSON responses
+5. **UI Flow**: 
+   - Stage Screen: Change species/stage, verify thresholds reload
+   - Control Screen: Verify current stage banner updates on reconnection
+6. **Concurrent Access**: Test editing thresholds on multiple devices simultaneously
+
+### Follow-ups
+
+1. Add unit tests for `StageThresholdsData` JSON serialization/deserialization
+2. Add integration tests for BLE read/write operations
+3. Consider adding "Reset to Defaults" button in Stage Screen threshold section
+4. Add telemetry for threshold updates (frequency, which stages most edited)
+5. Consider UX improvement: Show diff indicator when stage thresholds differ from control targets
+
+No mock data introduced. All configuration via environment variables and BLE communication. Baseline updated latest-first per project rules.
+
+## 2025-11-12 - Stage Write Backward Compatibility (Env-Driven Normalization) ✅
+
+Status: Complete (client-side normalization; no protocol change; env-configurable)
+
+What changed:
+- Added `_normalizeStageStateForWrite()` in `BLERepository` to map unsupported species IDs and clamp `expectedDays` before serialization.
+- Behavior is driven entirely by environment variables provided at runtime via `.env` and injected in `main.dart` using `BLERepository.setRuntimeEnv(dotenv.env)`.
+- No hard-coded mappings; no mock data.
+
+Environment keys:
+- `MUSHPI_SPECIES_WRITE_COMPAT_MAP` (e.g., `99:1,3:1`) — src:dst mapping for species IDs.
+- `MUSHPI_PI_SUPPORTED_SPECIES_IDS` (e.g., `1,2,3`) — allow-list; if outgoing ID not in list, fallback to first allowed.
+- `MUSHPI_SPECIES_FALLBACK_ID` (e.g., `1`) — used when legacy Custom(99) or unknown and no allow-list mapping applies.
+- `MUSHPI_STAGE_EXPECTED_DAYS_MIN` (default 1) — lower clamp for expectedDays.
+- `MUSHPI_STAGE_EXPECTED_DAYS_MAX` (default 365) — upper clamp for expectedDays.
+
+Logging:
+- All normalization events log under `BLERepository.BC` (mapping and clamping details), plus standard packet logs.
+
+Rationale:
+- Some Pi builds only recognize Oyster thresholds; this ensures Stage writes succeed even if the app selects Custom(99) or other species not configured on the device.
+- Maintains wire compatibility and avoids server changes while preserving configurability.
+
+Verification:
+1. Configure `.env` with `MUSHPI_SPECIES_WRITE_COMPAT_MAP=99:1` and, optionally, `MUSHPI_PI_SUPPORTED_SPECIES_IDS=1`.
+2. Connect to a Pi that only supports Oyster.
+3. From Stage screen select a species that maps (e.g., Custom if 99).
+4. Update Stage — server accepts write; Pi logs no species mismatch.
+5. Observe `BLERepository.BC` logs confirming mapping/clamp.
+
+Files Modified:
+- `lib/data/repositories/ble_repository.dart` (normalization already integrated)
+- `lib/main.dart` (env load + injection; already present)
+
+Follow-ups:
+1. Add Stage serializer round-trip tests covering expectedDays clamping and species mapping.
+2. Surface a small UI hint when normalization occurred (optional, behind a debug/dev flag).
+
+## 2025-11-12 - Adaptive BLE Smart Write Fallback ✅
+
+Status: Complete (platform exception resolved, write path resilient)
+
+Highlights:
+- Introduced `_smartWrite()` helper in `BLERepository` to dynamically choose write mode (`WRITE_WITH_RESPONSE` vs `WRITE_NO_RESPONSE`) based on characteristic capabilities.
+- Automatically falls back: if a no-response write fails (Android PlatformException: WRITE_NO_RESPONSE not supported), retries once with response mode.
+- Refactored write methods (`writeControlTargets`, `writeStageState`, `writeOverrideBits`) to use `_smartWrite()` instead of hard-coded `withoutResponse` flags.
+- Added env-driven preferences (no hard-coded booleans):
+  - `MUSHPI_BLE_CONTROL_PREFER_NO_RESPONSE` (default false)
+  - `MUSHPI_BLE_STAGE_PREFER_NO_RESPONSE` (default false)
+  - `MUSHPI_BLE_OVERRIDE_PREFER_NO_RESPONSE` (default true to preserve legacy behavior)
+  - `MUSHPI_BLE_WRITE_RETRY_DELAY_MS` (default 200)
+- Structured logging for each attempt:
+  - Request line: `📤 BLE WRITE REQUEST` with uuid, byte length, properties and attempt ordering
+  - Attempt lines: `➡️ Attempt N/M mode=...`
+  - Success: `✅ WRITE OK`
+  - Failure & fallback: `⚠️ WRITE FAILED ... (will fallback)`
+- Preserves existing packet logging; no secrets recorded; only UUID and lengths.
+- Eliminated previous PlatformException crash when override bits characteristic did not support `WRITE_NO_RESPONSE` on certain Android stacks.
+
+Technical Notes:
+- Capability detection via `char.properties.write` & `char.properties.writeWithoutResponse`.
+- Attempts list built respecting preferred mode & availability; single fallback only (no uncontrolled retries).
+- Throws `BLEException` if characteristic not writable.
+- Maintains integrity for control/stage writes (prefers with-response unless env overrides).
+
+Files Modified:
+- `lib/data/repositories/ble_repository.dart`
+
+Environment / Config:
+- Added optional boolean toggles (above). If absent, defaults applied via `_getEnvBool`.
+- No new mandatory variables; absence does not cause failure.
+
+Follow-ups:
+1. Add unit test harness (integration) validating fallback path triggers when forcing no-response on a write-only characteristic that lacks the property.
+2. Consider telemetry counter for number of fallbacks to surface potential characteristic misconfiguration.
+3. Evaluate enabling no-response for high-frequency small packets (future config streaming) with rate limiting.
+
+Impact:
+- Robust BLE write operations reduce user-visible failures.
+- Transparent logging simplifies field diagnostics.
+- Maintains low overhead (single additional conditional + potential one retry).
+
+No mock data introduced. Baseline updated latest-first per project rules.
+
+## 2025-11-12 - StageScreen UI: Preset Species, Always-visible Date Planted, Disabled Apply Offline ✅
+
+Status: Complete (clarified editor flow; button disabled when disconnected; no polling).
+
+Highlights:
+- Reordered Stage editor to match user flow: Species → Date Planted → Growth Stage → Expected Period → Current Progress → Automation → Guidelines.
+- “Date Planted” is now always visible with Edit and Reset-to-Now actions, even before first device read.
+- Species selection limited to preset options (Oyster/Shiitake/Lion’s Mane); no custom input.
+- Expected Period split into its own section; auto-syncs defaults when Species/Stage changes and updates text field.
+- Apply button is shown when there are changes and is disabled when disconnected (label indicates to connect).
+- Kept event-driven refreshes only (connection transition, resume, return). No polling introduced.
+
+Files Modified: `lib/screens/stage_screen.dart`
+
+Follow-ups:
+1. Add small debounce on reconnection-triggered reloads if we see flapping in logs.
+2. Widget test for disabled Apply when offline and enabled when connected with pending changes.
+
+Environment / Config: No changes.
+
+## 2025-11-12 - StageScreen Connection-Gated Load & listenManual Migration ✅
+
+Status: Complete (assertion resolved; stage data loads only on BLE connection transition; no premature reads while disconnected).
+
+Highlights:
+- Replaced improper `ref.listen` inside `initState()` (was causing Riverpod assertion) with `ref.listenManual` subscription stored as `ProviderSubscription` in `stage_screen.dart`.
+- Initial stage state now defers until BLE connection is established; if already connected at mount, schedules a post-frame load.
+- Subsequent refresh triggers only on: navigation return (`didPopNext`), app resume (`didChangeAppLifecycleState`), and BLE connection transition from non-connected → connected.
+- Eliminated unconditional first-frame `_loadCurrentStageState()` call to prevent errors & wasted BLE reads when offline.
+- Cleanup on `dispose()` via `.close()` ensuring no dangling listener.
+- No polling introduced; event-driven only (preserves low BLE traffic baseline).
+
+Provider Contract Changes:
+- `bleConnectionStateProvider` now listened via `listenManual` (manual lifecycle control) inside `StageScreen`.
+- Stage data refresh logic unaffected aside from connection gating; read/write semantics remain the same.
+
+Files Modified: `lib/screens/stage_screen.dart`
+
+Follow-ups:
+1. Add unit/widget test covering connection transition triggering a single stage load.
+2. Debounce multiple fast reconnect events (rare) if observed in field logs.
+3. Consolidate lifecycle refresh triggers into a small utility mixin for reuse across screens.
+
+Environment / Config: No new env vars required; existing BLE timeouts apply.
+
+Latest-first entry added per baseline rules.
+
+## 2025-11-12 - Control Targets Read Hardening + Offline Cache ✅
+
+Status: Complete (env-driven timeout/retry, offline short-circuit, caching).
+
+Highlights:
+- Added runtime environment variable loading via `.env` using `flutter_dotenv` (registered as asset).
+- Hardened `BLERepository.readControlTargets()` with read property check, configurable timeout + retry (`MUSHPI_BLE_READ_TIMEOUT_MS`, `MUSHPI_BLE_READ_RETRY_DELAY_MS`, `MUSHPI_BLE_READ_MAX_RETRIES`).
+- Structured logging for attempts (raw + parsed) with packet namespace.
+- Injected env map at startup (repository statically receives runtime env) without coupling to dotenv imports.
+- Offline guard: `controlTargetsFutureProvider` now short-circuits when disconnected; avoids characteristic read exceptions.
+- Optional cached fallback when offline, gated by `MUSHPI_BLE_OFFLINE_USE_CACHE=true`, sourcing JSON from Settings table key `last_control_targets_json`.
+- Successful reads persist JSON (no mock data; real values only) for future offline display.
+- `.env` created with safe defaults (no hard-coded literals in source):
+  - `MUSHPI_BLE_READ_TIMEOUT_MS=4000`
+  - `MUSHPI_BLE_READ_RETRY_DELAY_MS=600`
+  - `MUSHPI_BLE_READ_MAX_RETRIES=1`
+  - `MUSHPI_BLE_OFFLINE_USE_CACHE=true`
+
+Files Modified: `pubspec.yaml`, `lib/main.dart`, `lib/data/repositories/ble_repository.dart`, `lib/providers/ble_provider.dart`, `lib/providers/actuator_state_provider.dart`
+Files Added: `.env`
+
+Follow-ups:
+- UI stale indicator for cached targets.
+- Unit test: provider offline cache & timeout edge case.
+- Central config service (future consolidation for upcoming config characteristics).
+
+No protocol changes; baseline updated latest-first.
+
+## 2025-11-12 - StageScreen: Full Editing, Conditional Reset, No Polling ✅
+
+Status: Complete (UX + BLE read/write).
+
+Highlights:
+- Full edit support: mode, species, stage, expectedDays, stageStartTime (with date + time pickers) and live days-in-stage preview.
+- Conditional start-time reset: preserved unless species/stage changed or user taps explicit "Reset Stage Start".
+- Revert button: restores last fetched device state; guards against accidental edits.
+- Validation & UX: expectedDays validated (0–365 inclusive); startTime must not be future or >1 year old; inline errors and disabled Apply when invalid; BLE errors surfaced non-blocking.
+- Event-based refresh only: reads on first visit, navigation return (RouteAware.didPopNext), app resume (WidgetsBindingObserver), and BLE reconnection (connection listener). No continuous polling.
+
+Contract (authoritative summary):
+- Service UUID: 12345678-1234-5678-1234-56789abcdef0
+- Stage State characteristic: read/write (no notify)
+- Schema (10 bytes, LE): [u8 mode, u8 species, u8 stage, u32 start_ts_secs, u16 expected_days, u8 reserved=0]
+  - mode: 0=FULL, 1=SEMI, 2=MANUAL
+  - expected_days: 0–365 inclusive
+  - reserved ignored on read; write as 0
+
+Implementation notes:
+- Global RouteObserver wired in `lib/app.dart`; StageScreen mixes RouteAware + WidgetsBindingObserver; listens to BLE connection state to re-read on reconnection.
+- Apply path performs conditional start-time handling and recalculates progress accordingly.
+- No timers; environmental/status notification flow remains unaffected.
+
+Follow-ups (tracked):
+- Add Stage serializer tests (round-trip + boundaries).
+- Enrich BLERepository stage read/write logs with contextTag and before→after diffs.
+
+## 2025-11-12
+
+- Stage Screen UX: Implemented event-based refresh (no continuous polling). The page now reloads stage data:
+  - when initially visited,
+  - when returning to it (didPopNext),
+  - when the app resumes from background,
+  - when BLE reconnects while the page is visible.
+
+  Changes:
+  - Added `RouteObserver<ModalRoute<void>>` in `lib/app.dart` and hooked into GoRouter `observers`.
+  - `StageScreen` now mixes in `RouteAware` and `WidgetsBindingObserver` and listens to `bleConnectionStateProvider` to trigger a single read on reconnection.
+  - No timers or background polling were introduced to avoid BLE chatter and to keep monitoring notifications unblocked.
+
 # MushPi Flutter App Development Baseline
 
 ## Project Overview
@@ -8,7 +535,7 @@
 **Communication:** BLE GATT protocol  
 **Version:** 1.0.0+1  
 **Created:** November 4, 2025  
-**Last Updated:** November 6, 2025 (23:50 UTC)
+**Last Updated:** November 12, 2025 (18:20 UTC)
 
 ## Development Progress
 
@@ -25,6 +552,28 @@
 ---
 
 ## Recent Changes
+
+### 2025-11-12 - BLE Config Extended Characteristics (Version/Control/In/Out) ✅
+**What Changed:**
+- Back-end introduced four new configuration characteristics (config_version, config_ctrl, config_in, config_out) extending existing GATT service (no new service UUID) for dynamic viewing/editing of `stage_config.json` via streamed JSON frames.
+- Wrapper helpers added (`get_config_version()`, `request_config_get()`) enabling Flutter integration to initiate HELLO→GET sequence without low-level characteristic handling yet.
+- GET streaming uses raw UTF-8 JSON slices (`DATA_CHUNK` frames with `data` field) instead of base64 to reduce overhead—client reconstructs by concatenating ordered slices between `DATA_BEGIN` and `DATA_END` and verifying final `sha256`.
+- PUT flow design retained base64 chunk ingestion on inbound characteristic for integrity; staged protocol: PUT_BEGIN → CHUNK frames → PUT_COMMIT → PUT_RESULT.
+- Environment variables defined for future Flutter use (via flutter_dotenv): `MUSHPI_CONFIG_PATH`, `MUSHPI_BLE_CONFIG_MAX_DOC_SIZE`, `MUSHPI_BLE_CONFIG_MAX_CHUNK`, `MUSHPI_BLE_CONFIG_RATE_LIMIT_MS`, `MUSHPI_BLE_CONFIG_WRITE_PIN`, `MUSHPI_BLE_CONFIG_WRITE_AUTH`.
+
+**Upcoming Flutter Tasks:**
+1. Discover and map new config characteristics (dynamic—do not hard-code until verified on device) inside BLERepository.
+2. Implement `fetchConfig()` that issues HELLO then GET and rebuilds JSON document; validate SHA-256 against `DATA_BEGIN`.
+3. Implement `updateConfig(json)` performing PUT_BEGIN, chunking per negotiated `max_chunk`, sending CHUNK frames via inbound characteristic, and final PUT_COMMIT; handle ACK/ERROR frames.
+4. Provide optional PIN field if HELLO reports `auth: required`; enforce rate limit based on last PUT timestamp.
+5. Build Config screen (view/edit) using reconstructed JSON; integrate validation paralleling backend schema (species, stage, start_time, expected_days, mode, thresholds dict).
+
+**Notes:**
+- No regression to existing 5 primary characteristics; current UI unaffected until new screen added.
+- Raw GET slices simplify client (no base64 decode); keep dual-mode clarity (GET raw / PUT base64) in docs.
+- Retry/backoff for PUT not yet specified—design with exponential backoff if `rate_limited` errors appear.
+
+---
 
 ### 2025-11-09 - Control and Stage Tabs Implementation ✅
 **What Changed:**

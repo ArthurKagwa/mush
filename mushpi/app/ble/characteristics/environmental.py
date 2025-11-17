@@ -42,13 +42,12 @@ class EnvironmentalMeasurementsCharacteristic(NotifyCharacteristic):
             Packed binary data (12 bytes)
         """
         try:
-            # Update data from sensor system if callback available
-            if self.get_sensor_data:
-                sensor_data = self.get_sensor_data()
-                if sensor_data:
-                    self._update_from_sensor_data(sensor_data)
-            
-            # Pack and return data
+            # IMPORTANT: Avoid calling external sensor callbacks here.
+            # This method runs in the GLib/BlueZ callback context. Any slow/blocking
+            # I/O (sensor reads) will stall the mainloop and freeze notifications after
+            # re-subscriptions. We therefore return the last cached payload only.
+            # The cache is maintained by update_data() from the main control loop.
+            # Pack and return cached data
             data = EnvironmentalSerializer.pack(self.env_data)
             
             logger.debug(f"BLE env read: CO2={self.env_data.co2_ppm}, "

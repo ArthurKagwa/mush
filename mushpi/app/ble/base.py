@@ -60,7 +60,7 @@ class BaseCharacteristic(ABC):
             self._create_characteristic()
 
     def _handle_notify_callback(self, notifying: bool, characteristic: Any):
-        """Called when client enables/disables CCCD"""
+        """Called when client enables/disables CCCD (notification subscription)"""
         self.characteristic = characteristic
         # Cache underlying characteristic object if present for direct updates
         if characteristic is not None:
@@ -72,7 +72,9 @@ class BaseCharacteristic(ABC):
         else:
             # When notifications are disabled clear cached object to avoid stale refs
             self._char_object_cached = None
-        logger.info(f"BLE {'ENABLED' if notifying else 'DISABLED'}: {self.uuid}")
+        # Use clearer wording to indicate this is about notification subscriptions, not BLE service shutdown
+        action = 'SUBSCRIBED' if notifying else 'UNSUBSCRIBED'
+        logger.info(f"🔔 BLE NOTIFY {action}: {self.uuid}")
         # When notifications are enabled, proactively push the current value
         # so clients receive a fresh packet immediately after subscription.
         if notifying:

@@ -1,3 +1,4 @@
+import 'dart:developer' as developer;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -5,7 +6,9 @@ import 'package:go_router/go_router.dart';
 import '../providers/farms_provider.dart';
 import '../providers/current_farm_provider.dart';
 import '../providers/actuator_state_provider.dart';
+import '../providers/ble_provider.dart';
 import '../core/constants/ble_constants.dart';
+import '../core/utils/ble_serializer.dart';
 import '../data/models/farm.dart';
 
 /// Monitoring screen showing real-time environmental data and system status.
@@ -113,7 +116,11 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
                               ElevatedButton(
                                 onPressed: () {
                                   Navigator.of(context).pop();
-                                  context.go('/farms');
+                                  // Navigate to Farms tab with mounted check
+                                  // to avoid navigation stack errors
+                                  if (context.mounted) {
+                                    context.go('/farms');
+                                  }
                                 },
                                 child: const Text('Go to Farms'),
                               ),
@@ -293,6 +300,16 @@ class _MonitoringScreenState extends ConsumerState<MonitoringScreen> {
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16.0),
                     child: _EnvironmentalOverviewCard(farm: selectedFarm),
+                  ),
+                ),
+
+                const SliverToBoxAdapter(child: SizedBox(height: 16)),
+
+                // Stage Progress card
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                    child: _StageProgressCard(),
                   ),
                 ),
 
@@ -1184,6 +1201,380 @@ class _ActuatorUnavailable extends StatelessWidget {
                     color: cs.onSurfaceVariant,
                   ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Stage Progress card showing cultivation stage and progression
+class _StageProgressCard extends ConsumerStatefulWidget {
+  const _StageProgressCard();
+
+  @override
+  ConsumerState<_StageProgressCard> createState() => _StageProgressCardState();
+}
+
+class _StageProgressCardState extends ConsumerState<_StageProgressCard> {
+  StageStateData? _stageData;
+  bool _isLoading = false;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStageData();
+  }
+
+  Future<void> _loadStageData() async {
+    if (!mounted) return;
+
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final bleOps = ref.read(bleOperationsProvider);
+      final data = await bleOps.readStageState();
+
+      if (!mounted) return;
+
+      if (data != null) {
+        developer.log(
+          '🎯 MONITORING DISPLAY: Received mode=${data.mode.name} (id=${data.mode.id}, displayName="${data.mode.displayName}")',
+          name: 'MonitoringScreen._StageProgressCard',
+        );
+      }
+
+      setState(() {
+        _stageData = data;
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _errorMessage = 'Failed to load stage data';
+        _isLoading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    return Card(
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.timeline, color: cs.primary),
+                const SizedBox(width: 8),
+                Text(
+                  'Stage Progress',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 20),
+                  onPressed: _loadStageData,
+                  tooltip: 'Refresh',
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            _buildContent(cs),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildContent(ColorScheme cs) {
+    if (_isLoading) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(16.0),
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    if (_errorMessage != null) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: cs.errorContainer,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.error_outline, color: cs.error),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _errorMessage!,
+                style: TextStyle(color: cs.onErrorContainer),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_stageData == null) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: cs.outlineVariant),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.info_outline, color: cs.onSurfaceVariant),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'No stage data available. Configure stages to begin.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: cs.onSurfaceVariant,
+                    ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // Calculate progress
+    final daysElapsed = _stageData!.daysInStage;
+    final expectedDays = _stageData!.expectedDays;
+    final progressPercent = expectedDays > 0
+        ? (daysElapsed / expectedDays * 100).clamp(0, 100)
+        : 0.0;
+    final daysRemaining = (expectedDays - daysElapsed).clamp(0, expectedDays);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Current Stage Info
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${_stageData!.species.displayName} - ${_stageData!.stage.displayName}',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.bold,
+                          color: cs.primary,
+                        ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    _stageData!.mode.displayName,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: cs.onSurfaceVariant,
+                        ),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: progressPercent >= 100
+                    ? cs.tertiaryContainer
+                    : cs.primaryContainer,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                progressPercent >= 100 ? 'COMPLETE' : 'IN PROGRESS',
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: progressPercent >= 100
+                          ? cs.onTertiaryContainer
+                          : cs.onPrimaryContainer,
+                    ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+
+        // Progress Bar
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Day $daysElapsed of $expectedDays',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w500,
+                      ),
+                ),
+                Text(
+                  '${progressPercent.toStringAsFixed(0)}%',
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                        color: cs.primary,
+                      ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: LinearProgressIndicator(
+                value: progressPercent / 100,
+                minHeight: 12,
+                backgroundColor: cs.surfaceContainerHighest,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  progressPercent >= 100 ? cs.tertiary : cs.primary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // Additional Info
+        Row(
+          children: [
+            Expanded(
+              child: _StageMetric(
+                icon: Icons.calendar_today,
+                label: 'Started',
+                value: _formatDate(_stageData!.stageStartTime),
+                color: cs.primary,
+              ),
+            ),
+            Expanded(
+              child: _StageMetric(
+                icon: progressPercent >= 100
+                    ? Icons.check_circle
+                    : Icons.access_time,
+                label: progressPercent >= 100 ? 'Complete' : 'Days Remaining',
+                value: progressPercent >= 100
+                    ? 'Ready to advance'
+                    : '$daysRemaining days',
+                color: progressPercent >= 100 ? cs.tertiary : cs.secondary,
+              ),
+            ),
+          ],
+        ),
+
+        // Next stage hint (only if not complete and not in MANUAL mode)
+        if (progressPercent < 100 && _stageData!.mode != ControlMode.manual)
+          Padding(
+            padding: const EdgeInsets.only(top: 16.0),
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: cs.secondaryContainer.withOpacity(0.5),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: cs.outline.withOpacity(0.3)),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.info_outline,
+                    size: 16,
+                    color: cs.onSecondaryContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _stageData!.mode == ControlMode.full
+                          ? 'Will auto-advance to next stage when complete'
+                          : 'Manual advancement required when complete',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: cs.onSecondaryContainer,
+                          ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  String _formatDate(DateTime date) {
+    final now = DateTime.now();
+    final diff = now.difference(date);
+
+    if (diff.inDays == 0) {
+      return 'Today';
+    } else if (diff.inDays == 1) {
+      return 'Yesterday';
+    } else if (diff.inDays < 7) {
+      return '${diff.inDays} days ago';
+    } else {
+      return '${date.day}/${date.month}/${date.year}';
+    }
+  }
+}
+
+/// Stage metric display widget
+class _StageMetric extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  const _StageMetric({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 16, color: color),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: cs.onSurfaceVariant,
+                    ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
           ),
         ],
       ),

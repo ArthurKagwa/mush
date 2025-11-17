@@ -11,7 +11,7 @@ Automated environmental control system for mushroom cultivation using Raspberry 
 cd ~/mushpi
 
 # Run the setup script
-bash setup_pi.sh
+bash scripts/setup/setup_pi.sh
 
 # Activate the virtual environment
 source venv/bin/activate
@@ -22,7 +22,7 @@ source venv/bin/activate
 If you see "attempt to write a readonly database" error:
 
 ```bash
-bash fix_db_permissions.sh
+bash scripts/setup/fix_db_permissions.sh
 ```
 
 ### 3. Run the Application
@@ -95,6 +95,19 @@ Expected addresses:
 - Heater (GPIO 23) - optional
 
 ## Troubleshooting
+
+## BLE Characteristics (env-control service)
+
+The Pi now also sends actuator status so clients can reflect live relay states:
+
+- env_measurements (notify/read): CO₂, temp, humidity, light, uptime
+- control_targets (read/write): threshold configuration
+- stage_state (read/write): current growth stage info
+- override_bits (write): manual relay control
+- status_flags (notify/read): system health flags
+- actuator_status (notify/read): current actuator ON/OFF bitfield
+   - UUID: `12345678-1234-5678-1234-56789abcdef6`
+   - Bits (u16): bit0=LIGHT, bit1=FAN, bit2=MIST, bit3=HEATER
 
 ### "GPIO libraries not available" Warning
 
@@ -175,15 +188,17 @@ python3 main.py  # Will recreate database
 
 ## Running as a Service
 
-For production deployment, run MushPi as a systemd service:
+For production deployment, run MushPi as a systemd service.
 
+**Quick installation:**
 ```bash
-# Copy service file
-sudo cp app/service/mushpi.service /etc/systemd/system/
+sudo bash scripts/setup/install_mushpi_service.sh
+```
 
-# Edit paths in service file if needed
-sudo nano /etc/systemd/system/mushpi.service
+**See detailed guide:** [SYSTEMCTL_README.md](../SYSTEMCTL_README.md)
 
+**Manual service commands:**
+```bash
 # Enable and start service
 sudo systemctl enable mushpi
 sudo systemctl start mushpi
@@ -225,29 +240,52 @@ Simulation mode will generate fake sensor readings and log relay operations with
 
 ```
 mushpi/
-├── main.py                 # Application entry point
-├── app/
+├── main.py                  # Application entry point
+├── requirements.txt         # Python dependencies
+├── .env.example            # Environment configuration template
+│
+├── app/                    # Application code
 │   ├── core/              # Core functionality
-│   │   ├── config.py      # Configuration management
-│   │   ├── sensors.py     # Sensor coordination
-│   │   ├── control.py     # Relay control
-│   │   ├── stage.py       # Growth stage management
-│   │   └── ble_gatt.py    # Bluetooth LE interface
 │   ├── sensors/           # Sensor implementations
-│   │   ├── scd41.py       # SCD41 CO2 sensor
-│   │   ├── dht22.py       # DHT22 temp/humidity
-│   │   └── light_sensor.py # ADS1115 + photoresistor
 │   ├── managers/          # Data managers
-│   │   ├── sensor_manager.py
-│   │   └── threshold_manager.py
 │   ├── database/          # Database operations
-│   │   └── manager.py
-│   └── config/            # Configuration files
-│       └── thresholds.json
-├── data/                  # Database and logs
-├── .env                   # Environment configuration (create from .env.example)
-└── .env.example           # Environment template
+│   ├── ble/              # BLE/GATT service
+│   ├── models/           # Data models
+│   ├── config/           # Configuration files
+│   └── service/          # Systemd service files
+│
+├── tests/                 # Test suite
+│   ├── unit/             # Unit tests
+│   ├── integration/      # Integration tests
+│   └── hardware/         # Hardware-specific tests
+│
+├── scripts/              # Utility scripts
+│   ├── setup/           # Installation scripts
+│   ├── diagnostic/      # Diagnostic tools
+│   └── tools/           # Utility tools
+│
+├── docs/                # Documentation
+│   ├── troubleshooting/ # Troubleshooting guides
+│   ├── guides/          # How-to guides
+│   └── reference/       # Reference docs
+│
+├── data/                # Database and logs
+└── esp32_sensors_arduino/ # ESP32 integration
 ```
+
+## Documentation
+
+- **Main Guide:** [README.md](README.md) - This file
+- **Service Management:** [SYSTEMCTL_README.md](../SYSTEMCTL_README.md) - Complete systemd guide
+- **Tests:** [tests/README.md](tests/README.md) - Testing guide
+- **Scripts:** [scripts/README.md](scripts/README.md) - Utility scripts
+- **Docs:** [docs/README.md](docs/README.md) - All documentation
+
+### Quick Links
+- [Troubleshooting Bluetooth](docs/troubleshooting/BLUETOOTH_TROUBLESHOOTING.md)
+- [Pin Reference](docs/guides/PIN_REVIEW.md)
+- [Quick Reference](docs/reference/QUICK_REFERENCE.md)
+- [Development Plan](docs/reference/PLAN.md)
 
 ## License
 

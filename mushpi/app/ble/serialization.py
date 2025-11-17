@@ -225,7 +225,7 @@ class StageStateSerializer:
             Packed binary data (10 bytes)
         """
         try:
-            return struct.pack(cls.FORMAT,
+            packed = struct.pack(cls.FORMAT,
                 data.mode,
                 data.species_id,
                 data.stage_id,
@@ -233,6 +233,8 @@ class StageStateSerializer:
                 data.expected_days,
                 0  # Padding byte
             )
+            logger.info(f"📤 STAGE STATE PACK: mode={data.mode} (0=FULL, 1=SEMI, 2=MANUAL), species={data.species_id}, stage={data.stage_id}")
+            return packed
         except Exception as e:
             logger.error(f"Error packing stage state: {e}")
             raise SerializationError(f"Failed to pack stage state: {e}")
@@ -252,13 +254,15 @@ class StageStateSerializer:
             
         try:
             unpacked = struct.unpack(cls.FORMAT, data)
-            return StageStateData(
+            stage_state = StageStateData(
                 mode=unpacked[0],
                 species_id=unpacked[1],
                 stage_id=unpacked[2], 
                 stage_start_ts=unpacked[3],
                 expected_days=unpacked[4]
             )
+            logger.info(f"📥 STAGE STATE UNPACK: mode={stage_state.mode} (0=FULL, 1=SEMI, 2=MANUAL), species={stage_state.species_id}, stage={stage_state.stage_id}")
+            return stage_state
         except Exception as e:
             logger.error(f"Error unpacking stage state: {e}")
             raise SerializationError(f"Failed to unpack stage state: {e}")
@@ -364,6 +368,39 @@ class StatusFlagsSerializer:
         except Exception as e:
             logger.error(f"Error unpacking status flags: {e}")
             raise SerializationError(f"Failed to unpack status flags: {e}")
+
+
+class ActuatorStatusSerializer:
+    """Serializer for actuator relay ON/OFF status bits.
+
+    Format: <H (u16)
+      bit0: LIGHT ON
+      bit1: FAN ON
+      bit2: MIST ON
+      bit3: HEATER ON
+      remaining bits reserved
+    Size: 2 bytes
+    """
+    FORMAT = '<H'
+    SIZE = 2
+
+    @classmethod
+    def pack(cls, bits: int) -> bytes:
+        try:
+            return struct.pack(cls.FORMAT, bits & 0xFFFF)
+        except Exception as e:
+            logger.error(f"Error packing actuator status bits: {e}")
+            raise SerializationError(f"Failed to pack actuator status bits: {e}")
+
+    @classmethod
+    def unpack(cls, data: bytes) -> int:
+        if len(data) != cls.SIZE:
+            raise SerializationError(f"Invalid actuator status length: {len(data)} (expected {cls.SIZE})")
+        try:
+            return struct.unpack(cls.FORMAT, data)[0]
+        except Exception as e:
+            logger.error(f"Error unpacking actuator status bits: {e}")
+            raise SerializationError(f"Failed to unpack actuator status bits: {e}")
 
 
 class DataConverter:
@@ -479,15 +516,21 @@ class DataConverter:
         stage_data = StageStateData.create_empty()
         
         try:
-            # Update mode
+            # Update mode (handle both string and numeric format)
             if 'mode' in data:
-                mode_str = data['mode'].upper()
-                if mode_str == 'FULL':
-                    stage_data.mode = 0
-                elif mode_str == 'SEMI':
-                    stage_data.mode = 1
-                elif mode_str == 'MANUAL':
-                    stage_data.mode = 2
+                mode_value = data['mode']
+                if isinstance(mode_value, str):
+                    # String format: 'full', 'semi', 'manual'
+                    mode_str = mode_value.upper()
+                    if mode_str == 'FULL':
+                        stage_data.mode = 0
+                    elif mode_str == 'SEMI':
+                        stage_data.mode = 1
+                    elif mode_str == 'MANUAL':
+                        stage_data.mode = 2
+                elif isinstance(mode_value, int):
+                    # Already numeric: 0=FULL, 1=SEMI, 2=MANUAL
+                    stage_data.mode = mode_value
                     
             # Update species (convert string to ID)
             if 'species' in data:
@@ -552,5 +595,5 @@ class DataConverter:
 __all__ = [
     'SerializationError',
     'EnvironmentalSerializer', 'ControlTargetsSerializer', 'StageStateSerializer',
-    'OverrideBitsSerializer', 'StatusFlagsSerializer', 'DataConverter'
+    'OverrideBitsSerializer', 'StatusFlagsSerializer', 'ActuatorStatusSerializer', 'DataConverter'
 ]

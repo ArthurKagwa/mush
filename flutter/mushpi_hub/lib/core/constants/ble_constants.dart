@@ -1,5 +1,5 @@
 /// BLE GATT Service and Characteristic UUIDs
-/// 
+///
 /// These UUIDs must match exactly with the MushPi Raspberry Pi BLE GATT server.
 /// Service UUID: 12345678-1234-5678-1234-56789abcdef0 (ENV-CONTROL)
 library;
@@ -13,12 +13,14 @@ class BLEConstants {
   /// Environmental Measurements Characteristic
   /// Properties: Read + Notify
   /// Data: 12 bytes (CO₂, temperature, humidity, light, uptime)
-  static const String envMeasurementsUUID = '12345678-1234-5678-1234-56789abcdef1';
+  static const String envMeasurementsUUID =
+      '12345678-1234-5678-1234-56789abcdef1';
 
   /// Control Targets Characteristic
   /// Properties: Read + Write
   /// Data: 15 bytes (temp min/max, humidity min, CO₂ max, light mode, timing)
-  static const String controlTargetsUUID = '12345678-1234-5678-1234-56789abcdef2';
+  static const String controlTargetsUUID =
+      '12345678-1234-5678-1234-56789abcdef2';
 
   /// Stage State Characteristic
   /// Properties: Read + Write
@@ -34,6 +36,12 @@ class BLEConstants {
   /// Properties: Read + Notify
   /// Data: 4 bytes (system status flags)
   static const String statusFlagsUUID = '12345678-1234-5678-1234-56789abcdef5';
+
+  /// Stage Thresholds Characteristic
+  /// Properties: Read + Write
+  /// Data: JSON format (species, stage, thresholds)
+  static const String stageThresholdsUUID =
+      '12345678-1234-5678-1234-56789abcdef9';
 
   /// Expected data sizes in bytes
   static const int envDataSize = 12;

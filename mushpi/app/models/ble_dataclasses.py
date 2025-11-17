@@ -16,6 +16,8 @@ CONTROL_TARGETS_UUID = "12345678-1234-5678-1234-56789abcdef2"
 STAGE_STATE_UUID = "12345678-1234-5678-1234-56789abcdef3"
 OVERRIDE_BITS_UUID = "12345678-1234-5678-1234-56789abcdef4"
 STATUS_FLAGS_UUID = "12345678-1234-5678-1234-56789abcdef5"
+# New: Actuator status (bitfield of current relay states)
+ACTUATOR_STATUS_UUID = "12345678-1234-5678-1234-56789abcdef6"
 
 
 class OverrideBits(IntFlag):
@@ -34,12 +36,17 @@ class StatusFlags(IntFlag):
     STAGE_READY = 1 << 2      # Ready for stage advance
     THRESHOLD_ALARM = 1 << 3  # Threshold violation
     CONNECTIVITY = 1 << 4     # BLE connected
-    # Actuator state bits (live relay status)
-    LIGHT_ON = 1 << 5         # Grow light relay currently ON
-    FAN_ON = 1 << 6           # Exhaust / circulation fan ON
-    MIST_ON = 1 << 8          # Humidifier/mist relay ON
-    HEATER_ON = 1 << 9        # Heater relay ON
     SIMULATION = 1 << 7       # Simulation mode active
+
+
+class ActuatorBits(IntFlag):
+    """Current actuator ON/OFF states (bitfield)
+    These reflect the live relay states on the Pi, not overrides.
+    """
+    LIGHT = 1 << 0   # grow_light relay
+    FAN = 1 << 1     # exhaust_fan relay
+    MIST = 1 << 2    # humidifier relay
+    HEATER = 1 << 3  # heater relay
 
 
 @dataclass
@@ -126,9 +133,9 @@ LIGHT_MODES = ['off', 'on', 'cycle']
 __all__ = [
     # UUIDs
     'ENV_MEASUREMENTS_UUID', 'CONTROL_TARGETS_UUID', 'STAGE_STATE_UUID',
-    'OVERRIDE_BITS_UUID', 'STATUS_FLAGS_UUID',
+    'OVERRIDE_BITS_UUID', 'STATUS_FLAGS_UUID', 'ACTUATOR_STATUS_UUID',
     # Enums
-    'OverrideBits', 'StatusFlags',
+    'OverrideBits', 'StatusFlags', 'ActuatorBits',
     # Data classes
     'EnvironmentalData', 'ControlTargets', 'StageStateData',
     # Mapping dictionaries
