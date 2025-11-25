@@ -1,3 +1,5 @@
 *.env
 .cursor/
 .vscode/
+.github/
+.gitignore
