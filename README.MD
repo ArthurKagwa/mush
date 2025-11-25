@@ -277,14 +277,4 @@ journalctl -u mushpi -f
 * Photo/inspection workflow + quality scoring
 * Cloud sync option (optional)
 
----
 
-## License
-
-MIT (proposed). See `LICENSE` (add file).
-
----
-
-## Acknowledgements
-
-Sensor and actuator vendors; open-source Python libs by Adafruit and community.
