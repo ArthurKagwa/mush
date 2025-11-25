@@ -44,7 +44,8 @@ class StatusFlagsCharacteristic(NotifyCharacteristic):
             # Pack and return data
             data = StatusFlagsSerializer.pack(int(self.status_flags))
             
-            logger.debug(f"BLE status read: flags=0x{int(self.status_flags):04X}")
+            # Promote to INFO so status flag changes are visible in normal logs
+            logger.info(f"BLE status read: flags=0x{int(self.status_flags):04X}")
             return data
             
         except Exception as e:
@@ -68,7 +69,7 @@ class StatusFlagsCharacteristic(NotifyCharacteristic):
             else:
                 self.status_flags &= ~StatusFlags.CONNECTIVITY
                 
-        logger.debug(f"Status flags updated: 0x{int(self.status_flags):04X}")
+        logger.info(f"Status flags updated: 0x{int(self.status_flags):04X}")
     
     def notify_update(self, connected_devices: set):
         """Send notification to connected devices

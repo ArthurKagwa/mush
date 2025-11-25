@@ -174,6 +174,8 @@ Retention policy: keep \~30 days of `readings/actions`, weekly `VACUUM`.
 
 ## BLE GATT
 
+> **📖 Full Protocol Reference:** See [`mushpi/docs/reference/BLE_PROTOCOL.md`](mushpi/docs/reference/BLE_PROTOCOL.md) for complete BLE protocol documentation including override bits, data formats, and examples.
+
 Service UUID: `12345678-1234-5678-1234-56789abcdef0` (ENV-CONTROL)
 
 Characteristics:

@@ -26,10 +26,12 @@ class BLERepository {
   BluetoothCharacteristic? _overrideBitsChar;
   BluetoothCharacteristic? _statusFlagsChar;
   BluetoothCharacteristic? _stageThresholdsChar;
+  BluetoothCharacteristic? _actuatorStatusChar;
 
   StreamSubscription<BluetoothConnectionState>? _connectionSubscription;
   StreamSubscription<List<int>>? _envNotificationSubscription;
   StreamSubscription<List<int>>? _statusNotificationSubscription;
+  StreamSubscription<List<int>>? _actuatorStatusNotificationSubscription;
   bool _hasEstablishedConnection = false;
 
   // Stream controllers for data
@@ -38,6 +40,8 @@ class BLERepository {
   final _environmentalDataController =
       StreamController<EnvironmentalReading>.broadcast();
   final _statusFlagsController = StreamController<int>.broadcast();
+  final _actuatorStatusController =
+      StreamController<ActuatorStatusData>.broadcast();
   final _scanResultsController = StreamController<List<ScanResult>>.broadcast();
 
   // Public streams
@@ -46,6 +50,8 @@ class BLERepository {
   Stream<EnvironmentalReading> get environmentalDataStream =>
       _environmentalDataController.stream;
   Stream<int> get statusFlagsStream => _statusFlagsController.stream;
+  Stream<ActuatorStatusData> get actuatorStatusStream =>
+      _actuatorStatusController.stream;
   Stream<List<ScanResult>> get scanResultsStream =>
       _scanResultsController.stream;
 
@@ -611,6 +617,12 @@ class BLERepository {
             debugPrint(
                 '       Properties: R=${char.properties.read} W=${char.properties.write} WNR=${char.properties.writeWithoutResponse} N=${char.properties.notify}');
             break;
+          case BLEConstants.actuatorStatusUUID:
+            _actuatorStatusChar = char;
+            debugPrint('    ✅ [BLE DISCOVER] Mapped to: Actuator Status');
+            debugPrint(
+                '       Properties: R=${char.properties.read} N=${char.properties.notify}');
+            break;
           default:
             debugPrint('    ⚠️ [BLE DISCOVER] Unknown characteristic');
         }
@@ -634,8 +646,17 @@ class BLERepository {
         throw BLEException('Not all required characteristics found');
       }
 
+      // Check for optional actuator status characteristic
+      if (_actuatorStatusChar != null) {
+        debugPrint(
+            '✅ [BLE DISCOVER] Optional Actuator Status characteristic found');
+      } else {
+        debugPrint(
+            'ℹ️ [BLE DISCOVER] Actuator Status characteristic not available (older firmware)');
+      }
+
       debugPrint(
-          '✅ [BLE DISCOVER] All 6 characteristics discovered and mapped');
+          '✅ [BLE DISCOVER] All 6 required characteristics discovered and mapped');
       developer.log('All characteristics discovered', name: 'BLERepository');
     } catch (e, stackTrace) {
       developer.log(
@@ -800,6 +821,73 @@ class BLERepository {
           );
         },
       );
+
+      // Subscribe to actuator status (if available)
+      if (_actuatorStatusChar != null) {
+        debugPrint(
+            '🔔 [BLE NOTIFY] Enabling notifications for Actuator Status...');
+        debugPrint('  Characteristic UUID: ${_actuatorStatusChar!.uuid}');
+
+        await _actuatorStatusChar!.setNotifyValue(true);
+        debugPrint(
+            '✅ [BLE NOTIFY] setNotifyValue(true) completed for Actuator Status');
+
+        final actuatorIsNotifying = _actuatorStatusChar!.isNotifying;
+        debugPrint(
+            '🔔 [BLE NOTIFY] Actuator Status isNotifying: $actuatorIsNotifying');
+
+        if (!actuatorIsNotifying) {
+          debugPrint(
+              '⚠️ [BLE NOTIFY] WARNING: Actuator Status characteristic reports NOT notifying after setNotifyValue!');
+        }
+
+        debugPrint(
+            '🔔 [BLE NOTIFY] Setting up stream listener for Actuator Status...');
+        _actuatorStatusNotificationSubscription =
+            _actuatorStatusChar!.lastValueStream.listen(
+          (data) {
+            try {
+              // LOG RAW PACKET
+              developer.log(
+                '📦 BLE PACKET RECEIVED [Actuator Status]: ${data.length} bytes - Raw: [${data.join(", ")}]',
+                name: 'BLERepository.Packets',
+              );
+
+              final status = BLEDataSerializer.parseActuatorStatus(data);
+              _actuatorStatusController.add(status);
+
+              developer.log(
+                '✅ Actuator status update: $status',
+                name: 'BLERepository',
+              );
+
+              // LOG PARSED STATUS
+              developer.log(
+                '⚡ PARSED STATUS [Actuator]: $status',
+                name: 'BLERepository.Packets',
+              );
+            } catch (e) {
+              developer.log(
+                '❌ Failed to parse actuator status from packet: [${data.join(", ")}]',
+                name: 'BLERepository.Packets',
+                error: e,
+                level: 900,
+              );
+            }
+          },
+          onError: (e) {
+            developer.log(
+              'Actuator status notification error',
+              name: 'BLERepository',
+              error: e,
+              level: 900,
+            );
+          },
+        );
+        debugPrint('✅ [BLE NOTIFY] Actuator Status stream listener active');
+      } else {
+        debugPrint('ℹ️ [BLE NOTIFY] Skipping Actuator Status (not available)');
+      }
 
       debugPrint('✅ [BLE NOTIFY] All notifications subscribed successfully');
       debugPrint('✅ [BLE NOTIFY] Ready to receive data from device');
@@ -1094,6 +1182,57 @@ class BLERepository {
     } catch (e, stackTrace) {
       developer.log(
         'Failed to read status flags',
+        name: 'BLERepository',
+        error: e,
+        stackTrace: stackTrace,
+        level: 1000,
+      );
+      rethrow;
+    }
+  }
+
+  /// Read actuator status (real-time relay states)
+  ///
+  /// Returns the current state of all hardware relays.
+  /// Returns null if the characteristic is not available (older firmware).
+  Future<ActuatorStatusData?> readActuatorStatus() async {
+    _ensureConnected();
+
+    // Check if characteristic is available
+    if (_actuatorStatusChar == null) {
+      developer.log(
+        'Actuator status characteristic not available (older firmware)',
+        name: 'BLERepository',
+        level: 800,
+      );
+      return null;
+    }
+
+    try {
+      developer.log(
+        '📥 BLE READ REQUEST [Actuator Status]',
+        name: 'BLERepository.Packets',
+      );
+
+      final data = await _actuatorStatusChar!.read();
+
+      // LOG RAW RESPONSE
+      developer.log(
+        '📦 BLE READ RESPONSE [Actuator Status]: ${data.length} bytes - Raw: [${data.join(", ")}]',
+        name: 'BLERepository.Packets',
+      );
+
+      final status = BLEDataSerializer.parseActuatorStatus(data);
+
+      developer.log(
+        '⚡ READ DATA [Actuator Status]: $status',
+        name: 'BLERepository.Packets',
+      );
+
+      return status;
+    } catch (e, stackTrace) {
+      developer.log(
+        'Failed to read actuator status',
         name: 'BLERepository',
         error: e,
         stackTrace: stackTrace,
@@ -1655,11 +1794,13 @@ class BLERepository {
 
     _envNotificationSubscription?.cancel();
     _statusNotificationSubscription?.cancel();
+    _actuatorStatusNotificationSubscription?.cancel();
     _connectionSubscription?.cancel();
 
     _connectionStateController.close();
     _environmentalDataController.close();
     _statusFlagsController.close();
+    _actuatorStatusController.close();
     _scanResultsController.close();
 
     debugPrint('✅ [BLE] BLE repository disposed');

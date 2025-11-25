@@ -27,6 +27,7 @@ class OverrideBits(IntFlag):
     MIST = 1 << 2         # bit2: Force mist on/off
     HEATER = 1 << 3       # bit3: Force heater on/off
     DISABLE_AUTO = 1 << 7 # bit7: Disable automation
+    EMERGENCY_STOP = 1 << 15  # bit15: Emergency stop (safety mode)
 
 
 class StatusFlags(IntFlag):

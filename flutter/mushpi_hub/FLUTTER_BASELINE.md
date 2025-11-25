@@ -1,3 +1,404 @@
+## 2025-01-XX - Chart Improvements: Zero/Negative Filtering & Date Range Selection ✅
+
+**Status**: Complete - Charts now filter invalid values and support custom date range selection.
+
+**Files Modified:**
+- `lib/screens/environmental_chart_screen.dart` - Added date range picker, filter for zero/negative values, reset to 24h button.
+- `lib/providers/readings_provider.dart` - Enhanced `readingsByPeriodProvider` with ThingSpeak backfill support.
+
+**Features Added:**
+
+1. **Zero/Negative Value Filtering:**
+   - Chart data points with zero or negative values are automatically filtered out.
+   - Prevents invalid sensor readings from cluttering charts.
+   - Minimum value calculation ensures positive baseline.
+
+2. **Custom Date Range Selection:**
+   - Added date range picker button in app bar (calendar icon).
+   - Users can select any date range from 2020 to present.
+   - Custom range displayed in farm header.
+   - "Reset to Last 24 Hours" button appears when custom range is active.
+   - Supports ThingSpeak backfill for custom ranges (same as 24-hour view).
+
+3. **Enhanced Provider:**
+   - `readingsByPeriodProvider` now includes ThingSpeak backfill logic.
+   - Works seamlessly with custom date ranges.
+   - Falls back gracefully when offline or misconfigured.
+
+**Impact:**
+- Cleaner charts without invalid data points.
+- Users can analyze historical data for any time period.
+- Better data visualization for long-term trend analysis.
+- Consistent ThingSpeak integration across all time ranges.
+
+---
+
+## 2025-01-XX - ThingSpeak Data Display When Away From Device ✅
+
+**Status**: Complete - App now explicitly shows ThingSpeak-only data when online but not connected to BLE device.
+
+**Files Modified:**
+- `lib/providers/readings_provider.dart` - Added explicit handling for ThingSpeak-only data when local readings are empty (away from device scenario).
+- `README.md` - Added ThingSpeak configuration documentation section.
+
+**Problem:**
+When users are away from the device (no BLE connection, no local data) but online, the app should display ThingSpeak data. The previous merge logic worked but wasn't explicit about this use case.
+
+**Solution:**
+- Added explicit check: if `localReadings.isEmpty` and `remoteReadings.isNotEmpty`, return remote data directly.
+- This ensures clear behavior when away from device - ThingSpeak data is shown immediately without merge logic.
+- Improved logging to indicate when ThingSpeak-only data is being returned.
+
+**Impact:**
+- Users can now view environmental charts when away from the farm, as long as they're online and ThingSpeak is configured.
+- Clearer code path for the "away from device" scenario.
+- Better logging helps debug ThingSpeak integration issues.
+
+---
+
+## 2025-11-21 - ThingSpeak Backfill for Environmental Charts ✅
+
+**Status**: Complete - Environmental charts now optionally backfill gaps using ThingSpeak when online.
+
+**Files Modified / Added:**
+- `lib/data/config/thingspeak_config.dart` (new) - Env-driven ThingSpeak config loader for Flutter.
+- `lib/data/repositories/thingspeak_repository.dart` (new) - Fetches historical feeds from ThingSpeak and maps them into `Reading` models.
+- `lib/providers/readings_provider.dart` - `last24HoursReadingsProvider` now merges ThingSpeak readings with local DB data.
+- `pubspec.yaml` - Added `http` dependency for REST calls (no mock data).
+
+**Behavior:**
+- The app still uses the **local Drift database** as the primary source for chart data.
+- If `.env` config enables ThingSpeak and provides valid credentials:
+  - The 24-hour readings provider fetches remote data for the same time window.
+  - **When away from device (no local data)**: Returns ThingSpeak-only readings directly.
+  - **When near device (has local data)**: Remote points are only added where there is **no local reading within ±2.5 minutes**, effectively filling gaps instead of duplicating data.
+  - All configuration (URL, channel, read key, field mappings) is controlled via environment variables:
+    - `MUSHPI_THINGSPEAK_ENABLED`
+    - `MUSHPI_THINGSPEAK_READ_API_KEY`
+    - `MUSHPI_THINGSPEAK_CHANNEL_ID`
+    - `MUSHPI_THINGSPEAK_BASE_URL`
+    - `MUSHPI_THINGSPEAK_FIELD_TEMPERATURE`, `MUSHPI_THINGSPEAK_FIELD_HUMIDITY`, `MUSHPI_THINGSPEAK_FIELD_CO2`, `MUSHPI_THINGSPEAK_FIELD_LIGHT`
+- If offline, misconfigured, or ThingSpeak returns an error:
+  - Charts automatically fall back to **local-only data** with no UI errors.
+
+**Impact:**
+- Users see smoother 24-hour charts even if the phone missed some BLE notifications, as long as the Pi successfully pushed data to ThingSpeak.
+- Users can view data when away from the farm (online but not connected via BLE).
+- No change to Pi-side protocol or BLE behavior; this is a **Flutter-only enhancement** that respects existing configuration rules (no hard-coded values, env-driven).
+
+---
+
+## 2025-11-19 - Enhanced Chart Scrolling & Time-Based X-Axis ✅
+
+**Status**: Complete - Charts now show accurate time gaps and are horizontally scrollable
+
+**Files Modified:**
+- `lib/screens/environmental_chart_screen.dart` (major update: ~900 lines)
+
+**Problem Statement:**
+
+The previous chart implementation had several limitations:
+1. X-axis used array indices (0, 1, 2, 3...) instead of actual timestamps
+2. Readings were displayed evenly spaced regardless of time gaps between them
+3. No way to see if readings were 1 minute apart or 1 hour apart
+4. All 24 hours compressed into view - couldn't see detail
+5. No ability to scroll or zoom to explore historical data
+
+**Solution: Time-Based Scrollable Charts**
+
+Completely redesigned chart implementation with:
+
+```
+Chart Features
+├─ Time-Based X-Axis
+│  ├─ Uses milliseconds since epoch (accurate time positioning)
+│  ├─ Shows actual gaps between readings
+│  └─ Timestamp-based grid lines and labels
+│
+├─ Horizontal Scrolling
+│  ├─ Swipe gesture to pan left/right through time
+│  ├─ Slider at bottom for quick navigation
+│  └─ Smooth animated transitions
+│
+├─ Zoom Controls
+│  ├─ Zoom In button (down to 1 hour view)
+│  ├─ Zoom Out button (up to full 24 hours)
+│  └─ Dynamic time range label (e.g., "6.0h view")
+│
+└─ Smart Display
+   ├─ Starts showing most recent data
+   ├─ Vertical grid lines show time divisions
+   ├─ Dots visible when zoomed in (< 3 hours)
+   └─ Adaptive labels (HH:mm or MMM dd HH:mm)
+```
+
+**Key Implementation Changes:**
+
+1. **Timestamp-Based Data Points**
+   ```dart
+   // Before: Index-based (evenly spaced)
+   FlSpot(index.toDouble(), value)
+   
+   // After: Time-based (accurate gaps)
+   FlSpot(reading.timestamp.millisecondsSinceEpoch.toDouble(), value)
+   ```
+
+2. **Stateful Chart Widget**
+   - Converted `_ChartCard` from `StatelessWidget` to `StatefulWidget`
+   - Maintains scroll position and zoom level
+   - Default 6-hour visible window
+   - Remembers position when switching between charts
+
+3. **Pan Gesture Support**
+   ```dart
+   GestureDetector(
+     onHorizontalDragUpdate: (details) {
+       setState(() {
+         // Pan through time based on drag distance
+         _scrollOffset -= details.delta.dx * sensitivity;
+       });
+     },
+     child: LineChart(...),
+   )
+   ```
+
+4. **Zoom Controls**
+   - **Zoom In**: Decreases visible window (minimum 1 hour)
+   - **Zoom Out**: Increases visible window (maximum = total data range)
+   - Dynamic label shows current view: "1.0h view", "6.0h view", "1.2d view"
+
+5. **Navigation Slider**
+   ```dart
+   Slider(
+     value: _scrollOffset,
+     min: 0,
+     max: maxTime - _visibleWindowMs,
+     onChanged: (value) => setState(() => _scrollOffset = value),
+   )
+   ```
+
+6. **Adaptive Time Labels**
+   - **< 12 hours**: Shows time only (HH:mm)
+   - **> 12 hours**: Shows date and time (MMM dd HH:mm)
+   - Grid interval adjusts to zoom level
+   - ~4-6 labels always visible
+
+7. **Enhanced Tooltips**
+   ```dart
+   LineTouchTooltipData(
+     getTooltipItems: (touchedSpots) {
+       // Shows: "22.5 °C\nNov 19, 14:30:45"
+       final dateTime = DateTime.fromMillisecondsSinceEpoch(spot.x.toInt());
+       return LineTooltipItem(
+         '${spot.y.toStringAsFixed(1)} $unit\n${format.format(dateTime)}',
+         const TextStyle(fontSize: 12),
+       );
+     },
+   )
+   ```
+
+**Technical Details:**
+
+- **Time Precision**: Uses milliseconds since epoch for exact positioning
+- **Default View**: 6 hours centered on most recent data
+- **Zoom Range**: 1 hour (minimum) to full dataset (maximum)
+- **Sensitivity**: Pan speed adjusted to visible window size
+- **Grid Lines**: Vertical dashed lines at time intervals
+- **Dot Visibility**: Shows dots only when zoomed in (< 3 hours) to reduce clutter
+
+**Benefits:**
+
+✅ **Accurate Time Representation**: See actual gaps between readings  
+✅ **Detailed Exploration**: Zoom in to see minute-by-minute changes  
+✅ **Easy Navigation**: Swipe or use slider to move through time  
+✅ **Better Understanding**: Identify patterns and anomalies more clearly  
+✅ **Responsive Design**: Adapts labels and grid to zoom level  
+✅ **Touch-Friendly**: Large tap targets for zoom controls  
+
+**User Experience Improvements:**
+
+1. **First Load**: Starts at most recent 6 hours (what users care about most)
+2. **Explore History**: Scroll left to see older data
+3. **Zoom for Detail**: Zoom in to see exact timing of changes
+4. **Quick Navigation**: Use slider to jump to specific time period
+5. **Visual Feedback**: Time range label shows current view
+
+**Example Use Cases:**
+
+- **Spot Data Gaps**: See if sensor was offline (large gaps between points)
+- **Analyze Events**: Zoom in to see exactly when temperature spiked
+- **Compare Periods**: Scroll to compare morning vs. evening patterns
+- **Verify Coverage**: Ensure consistent data collection
+
+**Future Enhancements:**
+
+- Pinch-to-zoom gesture support
+- Two-finger pan for faster scrolling
+- Bookmark specific time periods
+- Compare multiple days side-by-side
+- Export visible time range data
+
+---
+
+## 2025-11-17 - Environmental Data Charts (24-Hour Trends) ✅
+
+**Status**: Complete - Added interactive charts for historical environmental data
+
+**Files Added:**
+- `lib/screens/environmental_chart_screen.dart` (~618 lines)
+- `lib/providers/readings_provider.dart` (~155 lines)
+
+**Files Modified:**
+- `lib/screens/monitoring_screen.dart` (made Environmental Data card clickable)
+- `lib/app.dart` (added route: `/monitoring/charts`)
+
+**Problem Statement:**
+
+Users could only see current environmental readings on the Monitoring screen:
+1. No way to view historical data trends
+2. Could not identify patterns or anomalies over time
+3. No visualization of how conditions change throughout the day
+4. Difficult to optimize growing conditions without trend analysis
+
+**Solution: Interactive Line Charts**
+
+Tapping the Environmental Data card navigates to a dedicated charts screen showing:
+
+```
+Environmental Trends Screen
+├─ Farm Header
+│  ├─ Selected farm name
+│  └─ Time period (Last 24 Hours)
+│
+├─ Data Summary
+│  ├─ Total data points collected
+│  └─ Time range (earliest → latest)
+│
+├─ Temperature Chart (°C)
+│  ├─ Line graph with trend visualization
+│  ├─ Average, min, max values
+│  ├─ Touch tooltips with precise readings
+│  └─ Time-based X-axis (HH:mm format)
+│
+├─ Humidity Chart (%)
+│  ├─ Line graph with area fill
+│  ├─ Statistical summary
+│  └─ Interactive tooltips
+│
+├─ CO₂ Chart (ppm)
+│  ├─ Line graph visualization
+│  ├─ Trend analysis
+│  └─ Tap-to-view details
+│
+└─ Light Chart (raw)
+   ├─ Light level trends
+   ├─ Pattern identification
+   └─ Interactive data points
+```
+
+**Key Features:**
+
+1. **Automatic Data Loading**
+   - Fetches readings from last 24 hours for selected farm
+   - Uses `ReadingsDao.getReadingsByFarmAndPeriod()`
+   - Empty state handling when no data available
+   - Pull-to-refresh support
+
+2. **Chart Library Integration**
+   - Uses `fl_chart` package (already in dependencies)
+   - Smooth curved lines for better visualization
+   - Gradient area fill under lines
+   - Color-coded by metric type:
+     * Temperature: Orange
+     * Humidity: Blue
+     * CO₂: Green
+     * Light: Amber
+
+3. **Interactive Features**
+   - Touch tooltips show exact values and timestamps
+   - Time-based X-axis with formatted labels
+   - Dynamic Y-axis scaling based on data range
+   - Dots visible for smaller datasets (<50 points)
+
+4. **Data Provider Architecture**
+   - `last24HoursReadingsProvider`: Auto-loads for selected farm
+   - `readingsByPeriodProvider`: Custom time range support
+   - `recentReadingsProvider`: Limited count for previews
+   - Automatic error handling and logging
+
+5. **User Experience**
+   - One-tap navigation from Monitoring screen
+   - Chevron icon indicates card is clickable
+   - Smooth transitions between screens
+   - Back button returns to Monitoring
+   - Refresh button to reload data
+
+**Navigation Flow:**
+
+```
+Monitoring Screen
+  └─ [Tap Environmental Data Card]
+       └─ Environmental Charts Screen
+            ├─ View 4 separate line charts
+            ├─ Analyze trends and patterns
+            ├─ Touch charts for details
+            └─ [Back] returns to Monitoring
+```
+
+**State Management:**
+
+```dart
+// Provider automatically watches selected farm
+final last24HoursReadingsProvider = FutureProvider<List<Reading>>((ref) {
+  final farmId = ref.watch(selectedMonitoringFarmIdProvider);
+  final readingsDao = ref.watch(readingsDaoProvider);
+  
+  final now = DateTime.now();
+  final twentyFourHoursAgo = now.subtract(Duration(hours: 24));
+  
+  return readingsDao.getReadingsByFarmAndPeriod(
+    farmId,
+    twentyFourHoursAgo,
+    now,
+  );
+});
+```
+
+**Chart Configuration:**
+
+- Grid lines for easier reading
+- Auto-scaled Y-axis with 10% padding
+- Time-formatted X-axis labels
+- Statistical summaries (avg, min, max)
+- Conditional dot rendering for data density
+- Touch-enabled tooltips with formatting
+
+**Empty States:**
+
+1. **No Farm Selected**: Prompts user to select farm from Monitoring
+2. **No Data Available**: Explains no readings in last 24 hours
+3. **Error State**: Shows error message with details
+
+**Technical Implementation:**
+
+- Follows SOLID principles and Flutter best practices
+- Immutable widgets with const constructors
+- Proper error handling and logging
+- Responsive layout with SingleChildScrollView
+- Card-based UI consistent with app theme
+- Efficient chart rendering with fl_chart
+
+**Future Enhancements:**
+
+- Custom date range selection
+- Export chart data to CSV
+- Comparison between multiple farms
+- Threshold lines overlaid on charts
+- Zoom and pan gestures
+- Different time intervals (12h, 48h, 1 week)
+
+---
+
 ## 2025-11-17 - Stage Configuration Wizard (Multi-Step Form) ✅
 
 **Status**: Complete - Replaced dual-form approach with guided 5-step wizard

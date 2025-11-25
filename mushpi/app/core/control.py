@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 from collections import deque
 
 from .config import config
@@ -24,6 +24,73 @@ except ImportError:
     GPIO_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+
+class RelayReasonCode(IntEnum):
+    """Compact reason codes for relay state changes (1 byte each for BLE efficiency)
+    
+    These codes are transmitted via BLE and decoded in the Flutter app to show
+    the same detailed reasoning that appears in Pi logs.
+    
+    Code ranges:
+    0-9: System states
+    10-29: Temperature control
+    30-49: Humidity control
+    50-69: CO2 control
+    70-89: Light control
+    90-109: Duty cycle limits
+    110-129: Safety/guards
+    130-149: Manual/overrides
+    150-255: Reserved for future use
+    """
+    # System states (0-9)
+    INITIALIZED = 0
+    NO_CHANGE = 1
+    RATE_LIMITED = 2
+    SYSTEM_ERROR = 3
+    
+    # Temperature control (10-29)
+    TEMP_TOO_HIGH = 10          # Fan cooling: temp >= max threshold
+    TEMP_NORMAL_HIGH = 11       # Fan off: temp <= max - hysteresis
+    TEMP_TOO_LOW = 12           # Heater on: temp <= min threshold
+    TEMP_NORMAL_LOW = 13        # Heater off: temp >= min + hysteresis
+    TEMP_NO_THRESHOLD = 14      # No temp threshold configured
+    
+    # Humidity control (30-49)
+    HUMIDITY_TOO_LOW = 30       # Mist on: RH <= min threshold
+    HUMIDITY_NORMAL = 31        # Mist off: RH >= min + hysteresis
+    HUMIDITY_TOO_HIGH = 32      # Fan on for dehumidification
+    HUMIDITY_NO_THRESHOLD = 33  # No humidity threshold configured
+    
+    # CO2 control (50-69)
+    CO2_TOO_HIGH = 50           # Fan on: CO2 >= max threshold
+    CO2_NORMAL = 51             # Fan off: CO2 <= max - hysteresis
+    CO2_NO_THRESHOLD = 52       # No CO2 threshold configured
+    
+    # Light control (70-89)
+    LIGHT_SCHEDULE_ON = 70      # Light on per schedule
+    LIGHT_SCHEDULE_OFF = 71     # Light off per schedule
+    LIGHT_ALWAYS_ON = 72        # Light mode: always on
+    LIGHT_ALWAYS_OFF = 73       # Light mode: always off/disabled
+    LIGHT_CYCLE = 74            # Light in cycle mode
+    LIGHT_VERIFICATION_FAIL = 75  # Light failed verification
+    
+    # Duty cycle limits (90-109)
+    DUTY_CYCLE_MAXED = 90       # Relay at max duty cycle percentage
+    DUTY_CYCLE_AVAILABLE = 91   # Duty cycle within limits
+    
+    # Safety/Guards (110-129)
+    CONDENSATION_GUARD_ACTIVE = 110    # Mist blocked by condensation guard
+    CONDENSATION_GUARD_INACTIVE = 111  # Condensation guard cleared
+    EMERGENCY_STOP = 112        # Emergency stop activated
+    
+    # Manual/Overrides (130-149)
+    MANUAL_OVERRIDE_ON = 130    # Manually forced ON
+    MANUAL_OVERRIDE_OFF = 131   # Manually forced OFF
+    MANUAL_MODE_ACTIVE = 132    # System in manual mode
+    
+    # Unknown/Default (250-255)
+    UNKNOWN = 255
 
 
 class RelayState(Enum):
@@ -321,16 +388,21 @@ class RelayManager:
             self.simulation_mode = True
             
     def set_relay(self, relay_name: str, state: RelayState) -> bool:
-        """Set relay state"""
+        """Set relay state
+        
+        CRITICAL: Only updates relay_states dict if hardware write succeeds,
+        ensuring single source of truth between software state and hardware.
+        """
         if relay_name not in self.relay_pins:
             logger.error(f"Unknown relay: {relay_name}")
             return False
             
         pin = self.relay_pins[relay_name]
-        self.relay_states[relay_name] = state
         
         if self.simulation_mode or not GPIO_AVAILABLE:
             logger.info(f"[SIMULATION] Relay {relay_name} (pin {pin}) -> {state.name}")
+            # Update state dict only after "successful" simulation
+            self.relay_states[relay_name] = state
             return True
             
         try:
@@ -341,15 +413,78 @@ class RelayManager:
                 
             GPIO.output(pin, gpio_value)
             logger.debug(f"Relay {relay_name} (pin {pin}) -> {state.name}")
+            
+            # ✅ FIXED: Update state dict ONLY after successful GPIO write
+            self.relay_states[relay_name] = state
             return True
             
         except Exception as e:
             logger.error(f"Failed to set relay {relay_name}: {e}")
+            # ✅ FIXED: Do NOT update relay_states on failure
             return False
             
     def get_relay_state(self, relay_name: str) -> Optional[RelayState]:
-        """Get current relay state"""
+        """Get current relay state from internal tracking dict
+        
+        Returns the last known state from relay_states dict.
+        For hardware verification, use get_actual_gpio_state() instead.
+        """
         return self.relay_states.get(relay_name)
+    
+    def get_actual_gpio_state(self, relay_name: str) -> Optional[RelayState]:
+        """Read actual relay state directly from GPIO hardware
+        
+        This provides ground truth by reading the physical pin state,
+        useful for verification and debugging state synchronization issues.
+        
+        Returns:
+            RelayState if hardware can be read, None if unavailable
+        """
+        if relay_name not in self.relay_pins:
+            logger.error(f"Unknown relay: {relay_name}")
+            return None
+            
+        # In simulation mode, return tracked state
+        if self.simulation_mode or not GPIO_AVAILABLE:
+            return self.relay_states.get(relay_name)
+        
+        try:
+            pin = self.relay_pins[relay_name]
+            gpio_value = GPIO.input(pin)
+            
+            # Convert GPIO level to RelayState based on active_high config
+            if self.active_high:
+                # Active high: HIGH=ON, LOW=OFF
+                return RelayState.ON if gpio_value == GPIO.HIGH else RelayState.OFF
+            else:
+                # Active low: LOW=ON, HIGH=OFF
+                return RelayState.ON if gpio_value == GPIO.LOW else RelayState.OFF
+                
+        except Exception as e:
+            logger.error(f"Failed to read GPIO state for {relay_name}: {e}")
+            # Fallback to tracked state
+            return self.relay_states.get(relay_name)
+    
+    def verify_relay_states(self) -> Dict[str, bool]:
+        """Verify all relay states match hardware
+        
+        Returns dict of {relay_name: matches} where matches=True if
+        tracked state equals hardware state.
+        """
+        results = {}
+        for relay_name in self.relay_pins.keys():
+            tracked = self.relay_states.get(relay_name)
+            actual = self.get_actual_gpio_state(relay_name)
+            results[relay_name] = (tracked == actual)
+            
+            if tracked != actual:
+                logger.warning(
+                    f"State mismatch for {relay_name}: "
+                    f"tracked={tracked.name if tracked else 'None'}, "
+                    f"actual={actual.name if actual else 'None'}"
+                )
+        
+        return results
         
     def emergency_stop(self) -> None:
         """Turn off all relays immediately"""
@@ -376,6 +511,17 @@ class ControlSystem:
         self.last_reading: Optional[SensorReading] = None
         self.action_history: List[RelayAction] = []
         
+        # Track current reason code for each relay's state (for BLE/app display)
+        # Key: relay_name, Value: reason code (u8, 0-255)
+        # These codes are decoded in Flutter app to show same reasons as Pi logs
+        self.relay_reasons: Dict[str, int] = {
+            'exhaust_fan': int(RelayReasonCode.INITIALIZED),
+            'circulation_fan': int(RelayReasonCode.INITIALIZED),
+            'humidifier': int(RelayReasonCode.INITIALIZED),
+            'grow_light': int(RelayReasonCode.INITIALIZED),
+            'heater': int(RelayReasonCode.INITIALIZED)
+        }
+        
         # Initialize controllers with hysteresis from config
         self.temp_hysteresis = config.control.temp_hysteresis
         self.humidity_hysteresis = config.control.humidity_hysteresis  
@@ -398,6 +544,17 @@ class ControlSystem:
         # Initialize duty cycle trackers
         self.duty_trackers['fan'] = DutyCycleTracker('fan', window_minutes=30, max_on_percent=60.0)
         self.duty_trackers['mist'] = DutyCycleTracker('mist', window_minutes=30, max_on_percent=40.0)
+        
+        # Manual override state tracking
+        # Key: relay_name, Value: bool (True if manually overridden)
+        # When a relay is manually overridden, automatic control should not change its state
+        self.manual_overrides: Dict[str, bool] = {
+            'exhaust_fan': False,
+            'circulation_fan': False,
+            'humidifier': False,
+            'grow_light': False,
+            'heater': False
+        }
         
         logger.info("Control system initialized")
         
@@ -497,10 +654,16 @@ class ControlSystem:
             # If condensation guard is active, force ventilation and stop misting
             if condensation_active:
                 actions['condensation_fan'] = self._set_relay_with_tracking(
-                    'exhaust_fan', RelayState.ON, 'Condensation guard', current_time
+                    'exhaust_fan', RelayState.ON, 
+                    RelayReasonCode.CONDENSATION_GUARD_ACTIVE,
+                    'Condensation guard',
+                    current_time
                 )
                 actions['condensation_mist'] = self._set_relay_with_tracking(
-                    'humidifier', RelayState.OFF, 'Condensation guard', current_time
+                    'humidifier', RelayState.OFF, 
+                    RelayReasonCode.CONDENSATION_GUARD_ACTIVE,
+                    'Condensation guard',
+                    current_time
                 )
                 return actions
                 
@@ -517,6 +680,10 @@ class ControlSystem:
         return (reading.temperature_c is not None or 
                 reading.humidity_percent is not None or 
                 reading.co2_ppm is not None)
+    
+    def _is_manually_overridden(self, relay_name: str) -> bool:
+        """Check if a relay is currently under manual override control"""
+        return self.manual_overrides.get(relay_name, False)
                 
     def _process_temperature_control(self, reading: SensorReading, current_time: datetime) -> Dict[str, RelayAction]:
         """Process temperature-based fan and heater control"""
@@ -526,23 +693,27 @@ class ControlSystem:
             return actions
             
         # Fan control for cooling (turn ON when TOO HOT)
-        if 'fan_temp' in self.controllers:
+        # Skip if fan is manually overridden
+        if 'fan_temp' in self.controllers and not self._is_manually_overridden('exhaust_fan'):
             controller = self.controllers['fan_temp']
             new_state, reason = controller.update(reading.temperature_c, current_time)
             
             if new_state == RelayState.ON and self.duty_trackers['fan'].can_turn_on(current_time):
+                reason_code = RelayReasonCode.TEMP_TOO_HIGH
                 actions['fan_temp'] = self._set_relay_with_tracking(
-                    'exhaust_fan', new_state, f"Temperature {reason}", current_time
+                    'exhaust_fan', new_state, reason_code, f"Temperature {reason}", current_time
                 )
             elif new_state == RelayState.OFF:
+                reason_code = RelayReasonCode.TEMP_NORMAL_HIGH
                 actions['fan_temp'] = self._set_relay_with_tracking(
-                    'exhaust_fan', new_state, f"Temperature {reason}", current_time
+                    'exhaust_fan', new_state, reason_code, f"Temperature {reason}", current_time
                 )
                 
         # Heater control for heating (turn ON when TOO COLD)
+        # Skip if heater is manually overridden
         # INVERTED: HysteresisController expects ON when value >= high
         # But we want ON when temp <= threshold, so we invert the controller state
-        if 'heater' in self.controllers:
+        if 'heater' in self.controllers and not self._is_manually_overridden('heater'):
             controller = self.controllers['heater']
             # Pass temperature value to controller (it will check if temp <= threshold)
             controller_state, reason = controller.update(reading.temperature_c, current_time)
@@ -575,8 +746,9 @@ class ControlSystem:
             controller.current_state = new_state
             controller.last_change_time = current_time
             
+            reason_code = RelayReasonCode.TEMP_TOO_LOW if new_state == RelayState.ON else RelayReasonCode.TEMP_NORMAL_LOW
             actions['heater'] = self._set_relay_with_tracking(
-                'heater', new_state, f"Temperature {reason}", current_time
+                'heater', new_state, reason_code, f"Temperature {reason}", current_time
             )
             
         return actions
@@ -585,7 +757,8 @@ class ControlSystem:
         """Process humidity-based mist control (turn ON when TOO DRY)"""
         actions = {}
         
-        if reading.humidity_percent is None or 'mist' not in self.controllers:
+        # Skip if mist is manually overridden
+        if reading.humidity_percent is None or 'mist' not in self.controllers or self._is_manually_overridden('humidifier'):
             return actions
             
         controller = self.controllers['mist']
@@ -621,8 +794,9 @@ class ControlSystem:
         controller.current_state = new_state
         controller.last_change_time = current_time
         
+        reason_code = RelayReasonCode.HUMIDITY_TOO_LOW if new_state == RelayState.ON else RelayReasonCode.HUMIDITY_NORMAL
         actions['mist'] = self._set_relay_with_tracking(
-            'humidifier', new_state, f"Humidity {reason}", current_time
+            'humidifier', new_state, reason_code, f"Humidity {reason}", current_time
         )
         
         return actions
@@ -636,7 +810,8 @@ class ControlSystem:
         """
         actions = {}
         
-        if reading.co2_ppm is None or 'fan_co2' not in self.controllers:
+        # Skip if fan is manually overridden
+        if reading.co2_ppm is None or 'fan_co2' not in self.controllers or self._is_manually_overridden('exhaust_fan'):
             return actions
             
         controller = self.controllers['fan_co2']
@@ -649,7 +824,7 @@ class ControlSystem:
             # CO2 too high - turn fan ON (regardless of temp control)
             if self.duty_trackers['fan'].can_turn_on(current_time):
                 actions['fan_co2'] = self._set_relay_with_tracking(
-                    'exhaust_fan', new_state, f"CO2 {reason}", current_time
+                    'exhaust_fan', new_state, RelayReasonCode.CO2_TOO_HIGH, f"CO2 {reason}", current_time
                 )
         elif new_state == RelayState.OFF:
             # CO2 is OK - but only turn fan OFF if temp control also doesn't need it
@@ -664,7 +839,7 @@ class ControlSystem:
             # Only turn fan OFF if neither CO2 nor temperature needs it
             if not temp_wants_fan_on:
                 actions['fan_co2'] = self._set_relay_with_tracking(
-                    'exhaust_fan', RelayState.OFF, f"CO2 {reason} (temp OK)", current_time
+                    'exhaust_fan', RelayState.OFF, RelayReasonCode.CO2_NORMAL, f"CO2 {reason} (temp OK)", current_time
                 )
             else:
                 logger.debug("CO2 normal but temperature still high - keeping fan ON")
@@ -675,6 +850,10 @@ class ControlSystem:
         """Process light schedule control with photoresistor verification"""
         actions = {}
         
+        # Skip if light is manually overridden
+        if self._is_manually_overridden('grow_light'):
+            return actions
+        
         should_be_on, reason = self.light_schedule.should_light_be_on(current_time)
         desired_state = RelayState.ON if should_be_on else RelayState.OFF
         
@@ -682,8 +861,18 @@ class ControlSystem:
         
         # Control light based on schedule
         if current_state != desired_state:
+            # Determine reason code based on schedule mode and desired state
+            if "Always on" in reason:
+                reason_code = RelayReasonCode.LIGHT_ALWAYS_ON
+            elif "Always off" in reason:
+                reason_code = RelayReasonCode.LIGHT_ALWAYS_OFF
+            elif desired_state == RelayState.ON:
+                reason_code = RelayReasonCode.LIGHT_SCHEDULE_ON
+            else:
+                reason_code = RelayReasonCode.LIGHT_SCHEDULE_OFF
+                
             actions['light'] = self._set_relay_with_tracking(
-                'grow_light', desired_state, reason, current_time
+                'grow_light', desired_state, reason_code, reason, current_time
             )
             # Record state change for verification timing
             self.light_verification.record_state_change(desired_state, current_time)
@@ -701,22 +890,46 @@ class ControlSystem:
                     logger.debug(f"Light verification: {verification_msg}")
                 else:
                     logger.warning(f"Light verification: {verification_msg}")
-                    # Could trigger additional actions here (alerts, retry logic, etc.)
+                    # Create alert for light verification failure
+                    try:
+                        from ..database.manager import DatabaseManager
+                        db = DatabaseManager()
+                        db.create_alert(
+                            alert_type='light_verification_failure',
+                            severity='warning',
+                            message=verification_msg,
+                            component='grow_light',
+                            metadata=f'{{"expected_state": "{current_relay_state.name}", "actual_light_level": {reading.light_level}, "failures": {self.light_verification.verification_failures}}}'
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to create light verification alert: {e}")
                     
         return actions
             
         return actions
         
     def _set_relay_with_tracking(self, relay_name: str, state: RelayState, 
-                                reason: str, timestamp: datetime) -> RelayAction:
-        """Set relay state and track the action"""
+                                reason_code: RelayReasonCode, reason_details: str,
+                                timestamp: datetime) -> RelayAction:
+        """Set relay state and track the action
+        
+        Args:
+            relay_name: Name of relay to control
+            state: ON or OFF
+            reason_code: Compact reason code for BLE transmission
+            reason_details: Human-readable reason for logs (e.g., "Value 22.5°C >= threshold 24.0°C")
+            timestamp: Action timestamp
+            
+        The reason_code is stored for BLE/app display, while reason_details
+        is used for Pi logs to maintain detailed logging.
+        """
         success = self.relay_manager.set_relay(relay_name, state)
         
         action = RelayAction(
             timestamp=timestamp,
             relay=relay_name,
             state=state,
-            reason=reason
+            reason=reason_details  # Full string for logs/history
         )
         
         # Update duty cycle tracking
@@ -724,6 +937,9 @@ class ControlSystem:
             self.duty_trackers['fan'].add_action(timestamp, state)
         elif relay_name == 'humidifier':
             self.duty_trackers['mist'].add_action(timestamp, state)
+        
+        # Store compact reason code for BLE/app display
+        self.relay_reasons[relay_name] = int(reason_code)
             
         self.action_history.append(action)
         
@@ -732,14 +948,14 @@ class ControlSystem:
         self.action_history = [a for a in self.action_history if a.timestamp > cutoff_time]
         
         if success:
-            logger.info(f"Relay action: {relay_name} -> {state.name} ({reason})")
+            logger.info(f"Relay action: {relay_name} -> {state.name} ({reason_details})")
         else:
-            logger.error(f"Failed relay action: {relay_name} -> {state.name} ({reason})")
+            logger.error(f"Failed relay action: {relay_name} -> {state.name} ({reason_details})")
             
         return action
         
     def set_mode(self, mode: ControlMode) -> None:
-        """Set control mode"""
+        """Set control mode and persist to database"""
         old_mode = self.mode
         self.mode = mode
         logger.info(f"Control mode changed: {old_mode.value} -> {mode.value}")
@@ -749,6 +965,74 @@ class ControlSystem:
         elif mode == ControlMode.SAFETY:
             logger.warning("Safety mode - emergency stop activated")
             self.relay_manager.emergency_stop()
+        
+        # Persist control mode to database
+        try:
+            from ..database.manager import DatabaseManager
+            db = DatabaseManager()
+            # Get current stage info to save control mode
+            stage_data = db.get_current_stage()
+            if stage_data:
+                db.save_current_stage(
+                    species=stage_data['species'],
+                    stage=stage_data['stage'],
+                    mode=stage_data['mode'],
+                    start_time=float(stage_data['start_time']),
+                    expected_days=stage_data['expected_days'],
+                    control_mode=mode.value
+                )
+                logger.debug(f"Control mode persisted to database: {mode.value}")
+        except Exception as e:
+            logger.warning(f"Failed to persist control mode to database: {e}")
+    
+    def set_manual_override(self, relay_name: str, override: bool, state: Optional[RelayState] = None) -> bool:
+        """Set or clear manual override for a relay
+        
+        Args:
+            relay_name: Name of relay to override (e.g., 'grow_light', 'exhaust_fan')
+            override: True to enable manual override, False to clear and return to automatic
+            state: Optional relay state to set when enabling override. If None, maintains current state.
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if relay_name not in self.manual_overrides:
+            logger.error(f"Unknown relay name for override: {relay_name}")
+            return False
+        
+        if override:
+            # Enable manual override
+            self.manual_overrides[relay_name] = True
+            
+            # Set relay state if provided, otherwise maintain current state
+            if state is not None:
+                success = self.relay_manager.set_relay(relay_name, state)
+                if success:
+                    # Update reason code
+                    self.relay_reasons[relay_name] = int(RelayReasonCode.MANUAL_OVERRIDE_ON if state == RelayState.ON else RelayReasonCode.MANUAL_OVERRIDE_OFF)
+                    logger.info(f"Manual override enabled for {relay_name} -> {state.name}")
+                else:
+                    logger.error(f"Failed to set relay state for manual override: {relay_name}")
+                    return False
+            else:
+                # Maintain current state, just mark as overridden
+                current_state = self.relay_manager.get_relay_state(relay_name)
+                if current_state:
+                    self.relay_reasons[relay_name] = int(RelayReasonCode.MANUAL_OVERRIDE_ON if current_state == RelayState.ON else RelayReasonCode.MANUAL_OVERRIDE_OFF)
+                logger.info(f"Manual override enabled for {relay_name} (maintaining current state)")
+        else:
+            # Clear manual override - return to automatic control
+            self.manual_overrides[relay_name] = False
+            self.relay_reasons[relay_name] = int(RelayReasonCode.MANUAL_MODE_ACTIVE)
+            logger.info(f"Manual override cleared for {relay_name} - returning to automatic control")
+        
+        return True
+    
+    def clear_all_overrides(self) -> None:
+        """Clear all manual overrides and return all relays to automatic control"""
+        for relay_name in list(self.manual_overrides.keys()):
+            self.set_manual_override(relay_name, False)
+        logger.info("All manual overrides cleared")
             
     def get_status(self) -> Dict:
         """Get current control system status"""

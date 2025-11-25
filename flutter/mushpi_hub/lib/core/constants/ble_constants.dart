@@ -43,12 +43,20 @@ class BLEConstants {
   static const String stageThresholdsUUID =
       '12345678-1234-5678-1234-56789abcdef9';
 
+  /// Actuator Status Characteristic
+  /// Properties: Read + Notify
+  /// Data: 2 bytes (relay ON/OFF state bitfield)
+  static const String actuatorStatusUUID =
+      '12345678-1234-5678-1234-56789abcdef6';
+
   /// Expected data sizes in bytes
   static const int envDataSize = 12;
   static const int controlDataSize = 15;
   static const int stageDataSize = 10;
   static const int overrideDataSize = 2;
   static const int statusDataSize = 4;
+  static const int actuatorDataSize =
+      6; // 2 bytes status bits + 4 bytes reason codes
 
   /// Device advertising name format: MushPi-<species><stage>
   /// Examples: "MushPi-OysterPinning", "MushPi-ShiitakeFruit"
@@ -202,4 +210,14 @@ class StatusFlags {
   static const int mistOn = 1 << 8; // Bit 8 - Humidifier/mister ON
   static const int heaterOn = 1 << 9; // Bit 9 - Heater relay ON
   static const int simulation = 1 << 7; // Bit 7
+}
+
+/// Actuator status bit flags for real-time relay states
+class ActuatorBits {
+  ActuatorBits._();
+
+  static const int light = 1 << 0; // Bit 0 - Grow light relay state
+  static const int fan = 1 << 1; // Bit 1 - Exhaust fan relay state
+  static const int mist = 1 << 2; // Bit 2 - Humidifier/mister relay state
+  static const int heater = 1 << 3; // Bit 3 - Heater relay state
 }

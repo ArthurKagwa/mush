@@ -63,6 +63,39 @@ Logging tag: `BLERepository.BC` (e.g., mapping/clamp events).
 | --- | --- | --- |
 | `MUSHPI_BLE_OFFLINE_USE_CACHE` | Show last cached Control Targets when offline | true |
 
+### ThingSpeak Integration (Remote Data Backfill)
+
+The app can fetch historical sensor readings from ThingSpeak when online, even when not connected to the BLE device. This allows viewing data when away from the farm.
+
+**Note:** The Flutter app requires its own ThingSpeak configuration in `.env`, separate from the Pi-side configuration.
+
+| Key | Purpose | Required |
+| --- | --- | --- |
+| `MUSHPI_THINGSPEAK_ENABLED` | Enable ThingSpeak integration | Yes (set to `true`) |
+| `MUSHPI_THINGSPEAK_READ_API_KEY` | ThingSpeak Read API Key | Yes |
+| `MUSHPI_THINGSPEAK_CHANNEL_ID` | ThingSpeak Channel ID | Yes |
+| `MUSHPI_THINGSPEAK_BASE_URL` | ThingSpeak API base URL | No (defaults to `https://api.thingspeak.com/channels`) |
+| `MUSHPI_THINGSPEAK_FIELD_TEMPERATURE` | Field name for temperature (e.g., `field1`) | Yes |
+| `MUSHPI_THINGSPEAK_FIELD_HUMIDITY` | Field name for humidity (e.g., `field2`) | Yes |
+| `MUSHPI_THINGSPEAK_FIELD_CO2` | Field name for CO₂ (e.g., `field3`) | Yes |
+| `MUSHPI_THINGSPEAK_FIELD_LIGHT` | Field name for light (e.g., `field4`) | Yes |
+
+**Behavior:**
+- When online and away from device (no local data): Shows ThingSpeak-only readings
+- When online and near device: Merges ThingSpeak data to fill gaps in local data (within ±2.5 minutes)
+- When offline or misconfigured: Falls back to local-only data (no errors)
+
+**Example `.env` configuration:**
+```env
+MUSHPI_THINGSPEAK_ENABLED=true
+MUSHPI_THINGSPEAK_READ_API_KEY=YOUR_READ_API_KEY
+MUSHPI_THINGSPEAK_CHANNEL_ID=YOUR_CHANNEL_ID
+MUSHPI_THINGSPEAK_FIELD_TEMPERATURE=field1
+MUSHPI_THINGSPEAK_FIELD_HUMIDITY=field2
+MUSHPI_THINGSPEAK_FIELD_CO2=field3
+MUSHPI_THINGSPEAK_FIELD_LIGHT=field4
+```
+
 ## Testing Stage Write Compatibility
 
 1. Add to `.env` (example):

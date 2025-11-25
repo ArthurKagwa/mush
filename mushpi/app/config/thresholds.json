@@ -2,6 +2,19 @@
   "Oyster": {
     "Incubation": {"temp_max": 28.0, "rh_min": 70.0, "co2_max": 5000, "light": {"mode": "off"}, "expected_days": 14},
     "Pinning":    {"temp_max": 22.0, "rh_min": 90.0, "co2_max": 1000, "light": {"mode": "cycle","on_min": 960,"off_min": 480}, "expected_days": 5},
-    "Fruiting":   {"temp_max": 20.0, "rh_min": 85.0, "co2_max": 800,  "light": {"mode": "cycle","on_min": 900,"off_min": 540}, "expected_days": 0}
+    "Fruiting":   {"temp_max": 20.0, "rh_min": 85.0, "co2_max": 800,  "light": {"mode": "cycle","on_min": 900,"off_min": 540}, "expected_days": 7},
+    "Harvest":    {"temp_max": 20.0, "rh_min": 85.0, "co2_max": 800,  "light": {"mode": "cycle","on_min": 900,"off_min": 540}, "expected_days": 7}
+  },
+  "Shiitake": {
+    "Incubation": {"temp_max": 25.0, "rh_min": 70.0, "co2_max": 5000, "light": {"mode": "off"}, "expected_days": 21},
+    "Pinning":    {"temp_max": 18.0, "rh_min": 90.0, "co2_max": 1000, "light": {"mode": "cycle","on_min": 720,"off_min": 720}, "expected_days": 7},
+    "Fruiting":   {"temp_max": 18.0, "rh_min": 85.0, "co2_max": 800,  "light": {"mode": "cycle","on_min": 720,"off_min": 720}, "expected_days": 10},
+    "Harvest":    {"temp_max": 18.0, "rh_min": 85.0, "co2_max": 800,  "light": {"mode": "cycle","on_min": 720,"off_min": 720}, "expected_days": 7}
+  },
+  "Lion's Mane": {
+    "Incubation": {"temp_max": 24.0, "rh_min": 70.0, "co2_max": 5000, "light": {"mode": "off"}, "expected_days": 14},
+    "Pinning":    {"temp_max": 18.0, "rh_min": 90.0, "co2_max": 1000, "light": {"mode": "cycle","on_min": 720,"off_min": 720}, "expected_days": 5},
+    "Fruiting":   {"temp_max": 18.0, "rh_min": 85.0, "co2_max": 800,  "light": {"mode": "cycle","on_min": 720,"off_min": 720}, "expected_days": 7},
+    "Harvest":    {"temp_max": 18.0, "rh_min": 85.0, "co2_max": 800,  "light": {"mode": "cycle","on_min": 720,"off_min": 720}, "expected_days": 7}
   }
 }

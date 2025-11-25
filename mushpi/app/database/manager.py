@@ -6,6 +6,7 @@ Handles all database operations for sensor data persistence.
 
 import sqlite3
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -106,6 +107,35 @@ class DatabaseManager:
                         UNIQUE(species, stage)
                     );
                     
+                    CREATE TABLE IF NOT EXISTS current_stage (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        species TEXT NOT NULL,
+                        stage TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        control_mode TEXT,
+                        start_time TEXT NOT NULL,
+                        expected_days INTEGER DEFAULT 0,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    
+                    CREATE TABLE IF NOT EXISTS migration_status (
+                        migration_name TEXT PRIMARY KEY,
+                        completed_at TIMESTAMP NOT NULL,
+                        description TEXT
+                    );
+                    
+                    CREATE TABLE IF NOT EXISTS alerts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT NOT NULL,
+                        alert_type TEXT NOT NULL,
+                        severity TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        component TEXT,
+                        resolved BOOLEAN DEFAULT 0,
+                        resolved_at TEXT,
+                        metadata TEXT
+                    );
+                    
                     CREATE INDEX IF NOT EXISTS idx_readings_timestamp 
                     ON sensor_readings(timestamp);
                     
@@ -114,6 +144,12 @@ class DatabaseManager:
                     
                     CREATE INDEX IF NOT EXISTS idx_stage_thresholds_species_stage
                     ON stage_thresholds(species, stage);
+                    
+                    CREATE INDEX IF NOT EXISTS idx_alerts_timestamp 
+                    ON alerts(timestamp);
+                    
+                    CREATE INDEX IF NOT EXISTS idx_alerts_resolved 
+                    ON alerts(resolved);
                 """)
                 
             # Set permissions on database file (readable/writable by user and group)
@@ -121,7 +157,7 @@ class DatabaseManager:
                 self.db_path.chmod(0o664)
             
             # Run migrations for existing databases
-            # self._run_migrations()
+            self._run_migrations()
             
             logger.info(f"Database initialized successfully at {self.db_path}")
             
@@ -157,6 +193,49 @@ class DatabaseManager:
                 if "no such table" not in str(e).lower():
                     logger.error(f"Error during migration: {e}")
                     raise
+            
+            # Migration 2: Add control_mode column to current_stage if missing
+            try:
+                cursor = conn.execute("PRAGMA table_info(current_stage)")
+                columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'control_mode' not in columns:
+                    logger.info("🔄 Running migration: Adding control_mode column to current_stage")
+                    conn.execute("""
+                        ALTER TABLE current_stage 
+                        ADD COLUMN control_mode TEXT
+                    """)
+                    logger.info("✅ Migration complete: control_mode column added")
+            except sqlite3.OperationalError as e:
+                # If table doesn't exist yet, that's fine (fresh database)
+                if "no such table" not in str(e).lower():
+                    logger.error(f"Error during migration: {e}")
+                    raise
+            
+            # Migration 3: Create alerts table if missing
+            try:
+                cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='alerts'")
+                if not cursor.fetchone():
+                    logger.info("🔄 Running migration: Creating alerts table")
+                    conn.execute("""
+                        CREATE TABLE IF NOT EXISTS alerts (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            timestamp TEXT NOT NULL,
+                            alert_type TEXT NOT NULL,
+                            severity TEXT NOT NULL,
+                            message TEXT NOT NULL,
+                            component TEXT,
+                            resolved BOOLEAN DEFAULT 0,
+                            resolved_at TEXT,
+                            metadata TEXT
+                        )
+                    """)
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_resolved ON alerts(resolved)")
+                    logger.info("✅ Migration complete: alerts table created")
+            except sqlite3.OperationalError as e:
+                logger.error(f"Error creating alerts table: {e}")
+                raise
             
     def save_reading(self, reading: SensorReading) -> None:
         """Save sensor reading to database"""
@@ -368,3 +447,226 @@ class DatabaseManager:
             logger.info(f"✅ Migrated {migrated_count} stage threshold configurations to database")
         else:
             logger.debug("No new thresholds to migrate from JSON")
+
+    def save_current_stage(
+        self,
+        species: str,
+        stage: str,
+        mode: str,
+        start_time: float,
+        expected_days: int,
+        control_mode: Optional[str] = None
+    ) -> None:
+        """Save or update current stage state in database
+        
+        Args:
+            species: Current species being cultivated
+            stage: Current growth stage
+            mode: Automation mode ('full', 'semi', 'manual')
+            start_time: Unix timestamp when stage started
+            expected_days: Expected duration of stage in days
+            control_mode: Optional control mode ('automatic', 'manual', 'safety')
+        """
+        with sqlite3.connect(self.db_path, timeout=self.timeout) as conn:
+            # Ensure control_mode column exists (for databases created before migration)
+            try:
+                cursor = conn.execute("PRAGMA table_info(current_stage)")
+                columns = [row[1] for row in cursor.fetchall()]
+                if 'control_mode' not in columns:
+                    conn.execute("ALTER TABLE current_stage ADD COLUMN control_mode TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column might already exist or table doesn't exist yet
+            
+            conn.execute("""
+                INSERT OR REPLACE INTO current_stage 
+                (id, species, stage, mode, control_mode, start_time, expected_days, updated_at)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            """, (species, stage, mode, control_mode, start_time, expected_days, time.time()))
+            conn.commit()
+            logger.debug(f"Saved current stage: {species}/{stage} (mode={mode}, control_mode={control_mode})")
+
+    def get_current_stage(self) -> dict | None:
+        """Load current stage state from database
+        
+        Returns:
+            Dictionary with stage state or None if no state exists
+        """
+        with sqlite3.connect(self.db_path, timeout=self.timeout) as conn:
+            # Try to get control_mode column (may not exist in old databases)
+            try:
+                cursor = conn.execute("""
+                    SELECT species, stage, mode, control_mode, start_time, expected_days, updated_at
+                    FROM current_stage
+                    WHERE id = 1
+                """)
+                row = cursor.fetchone()
+                
+                if row:
+                    result = {
+                        "species": row[0],
+                        "stage": row[1],
+                        "mode": row[2],
+                        "control_mode": row[3],  # May be None for old databases
+                        "start_time": row[4],
+                        "expected_days": row[5],
+                        "updated_at": row[6]
+                    }
+                    logger.debug(f"Loaded current stage: {result['species']}/{result['stage']} (mode={result['mode']}, control_mode={result.get('control_mode')})")
+                    return result
+            except sqlite3.OperationalError:
+                # Fallback for databases without control_mode column
+                cursor = conn.execute("""
+                    SELECT species, stage, mode, start_time, expected_days, updated_at
+                    FROM current_stage
+                    WHERE id = 1
+                """)
+                row = cursor.fetchone()
+                
+                if row:
+                    result = {
+                        "species": row[0],
+                        "stage": row[1],
+                        "mode": row[2],
+                        "control_mode": None,  # Not available in old schema
+                        "start_time": row[3],
+                        "expected_days": row[4],
+                        "updated_at": row[5]
+                    }
+                    logger.debug(f"Loaded current stage (legacy): {result['species']}/{result['stage']} (mode={result['mode']})")
+                    return result
+            
+            logger.debug("No current stage found in database")
+            return None
+    
+    def has_migration_run(self, migration_name: str) -> bool:
+        """Check if a specific migration has already been completed
+        
+        Args:
+            migration_name: Unique identifier for the migration (e.g., 'thresholds_json_migration')
+            
+        Returns:
+            True if migration has been completed, False otherwise
+        """
+        try:
+            with sqlite3.connect(self.db_path, timeout=self.timeout) as conn:
+                # Ensure migration_status table exists (defensive check)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS migration_status (
+                        migration_name TEXT PRIMARY KEY,
+                        completed_at TIMESTAMP NOT NULL,
+                        description TEXT
+                    )
+                """)
+                cursor = conn.execute(
+                    "SELECT completed_at FROM migration_status WHERE migration_name = ?",
+                    (migration_name,)
+                )
+                row = cursor.fetchone()
+                return row is not None
+        except sqlite3.Error as e:
+            logger.error(f"Error checking migration status: {e}")
+            # If we can't check, assume migration hasn't run (safer to migrate than skip)
+            return False
+    
+    def mark_migration_complete(self, migration_name: str, description: str = "") -> None:
+        """Mark a migration as completed
+        
+        Args:
+            migration_name: Unique identifier for the migration
+            description: Optional description of what the migration did
+        """
+        try:
+            with sqlite3.connect(self.db_path, timeout=self.timeout) as conn:
+                # Ensure migration_status table exists (defensive check)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS migration_status (
+                        migration_name TEXT PRIMARY KEY,
+                        completed_at TIMESTAMP NOT NULL,
+                        description TEXT
+                    )
+                """)
+                conn.execute(
+                    "INSERT OR REPLACE INTO migration_status (migration_name, completed_at, description) VALUES (?, ?, ?)",
+                    (migration_name, time.time(), description)
+                )
+                conn.commit()
+                logger.info(f"✅ Migration marked complete: {migration_name}")
+        except sqlite3.Error as e:
+            logger.error(f"Error marking migration complete: {e}")
+            raise
+    
+    def create_alert(self, alert_type: str, severity: str, message: str, 
+                    component: Optional[str] = None, metadata: Optional[str] = None) -> int:
+        """Create an alert record in the database
+        
+        Args:
+            alert_type: Type of alert (e.g., 'light_verification_failure', 'sensor_error')
+            severity: Severity level ('info', 'warning', 'error', 'critical')
+            message: Alert message
+            component: Optional component name (e.g., 'grow_light', 'sensor')
+            metadata: Optional JSON metadata
+            
+        Returns:
+            Alert ID
+        """
+        from datetime import datetime
+        with sqlite3.connect(self.db_path, timeout=self.timeout) as conn:
+            cursor = conn.execute("""
+                INSERT INTO alerts (timestamp, alert_type, severity, message, component, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                datetime.now().isoformat(),
+                alert_type,
+                severity,
+                message,
+                component,
+                metadata
+            ))
+            conn.commit()
+            alert_id = cursor.lastrowid
+            logger.info(f"Alert created: {alert_type} - {message} (ID: {alert_id})")
+            return alert_id
+    
+    def get_unresolved_alerts(self, alert_type: Optional[str] = None) -> list:
+        """Get all unresolved alerts
+        
+        Args:
+            alert_type: Optional filter by alert type
+            
+        Returns:
+            List of alert dictionaries
+        """
+        with sqlite3.connect(self.db_path, timeout=self.timeout) as conn:
+            conn.row_factory = sqlite3.Row
+            if alert_type:
+                cursor = conn.execute("""
+                    SELECT * FROM alerts 
+                    WHERE resolved = 0 AND alert_type = ?
+                    ORDER BY timestamp DESC
+                """, (alert_type,))
+            else:
+                cursor = conn.execute("""
+                    SELECT * FROM alerts 
+                    WHERE resolved = 0
+                    ORDER BY timestamp DESC
+                """)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def resolve_alert(self, alert_id: int) -> bool:
+        """Mark an alert as resolved
+        
+        Args:
+            alert_id: Alert ID to resolve
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        from datetime import datetime
+        with sqlite3.connect(self.db_path, timeout=self.timeout) as conn:
+            cursor = conn.execute("""
+                UPDATE alerts 
+                SET resolved = 1, resolved_at = ?
+                WHERE id = ?
+            """, (datetime.now().isoformat(), alert_id))
+            conn.commit()
+            return cursor.rowcount > 0

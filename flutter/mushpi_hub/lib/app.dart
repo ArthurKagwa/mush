@@ -16,6 +16,7 @@ import 'screens/farm_detail_screen.dart';
 import 'screens/device_scan_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/history_screen.dart';
+import 'screens/environmental_chart_screen.dart';
 import 'widgets/main_scaffold.dart';
 
 /// Main application widget with theme and routing configuration.
@@ -165,6 +166,15 @@ final routerProvider = Provider<GoRouter>((ref) {
                 path: '/monitoring',
                 name: 'monitoring',
                 builder: (context, state) => const MonitoringScreen(),
+                routes: [
+                  // Environmental charts screen
+                  GoRoute(
+                    path: 'charts',
+                    name: 'environmental-charts',
+                    builder: (context, state) =>
+                        const EnvironmentalChartScreen(),
+                  ),
+                ],
               ),
             ],
           ),

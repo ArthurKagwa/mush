@@ -285,6 +285,7 @@ class OverrideBitsSerializer:
           bit2: MIST override
           bit3: HEATER override
           bit7: DISABLE_AUTOMATION
+          bit15: EMERGENCY_STOP (safety mode)
           
         Args:
             bits: Override bits value
@@ -371,33 +372,61 @@ class StatusFlagsSerializer:
 
 
 class ActuatorStatusSerializer:
-    """Serializer for actuator relay ON/OFF status bits.
+    """Serializer for actuator relay ON/OFF status bits + reason codes.
 
-    Format: <H (u16)
-      bit0: LIGHT ON
-      bit1: FAN ON
-      bit2: MIST ON
-      bit3: HEATER ON
-      remaining bits reserved
-    Size: 2 bytes
+    Format: <H4B (u16 + 4 unsigned bytes)
+      Byte 0-1: Status bits (u16)
+        bit0: LIGHT ON
+        bit1: FAN ON
+        bit2: MIST ON
+        bit3: HEATER ON
+        remaining bits reserved
+      Byte 2: FAN reason code (0-255)
+      Byte 3: MIST reason code (0-255)
+      Byte 4: LIGHT reason code (0-255)
+      Byte 5: HEATER reason code (0-255)
+    Size: 6 bytes (2 for status bits + 4 for reason codes)
     """
-    FORMAT = '<H'
-    SIZE = 2
+    FORMAT = '<H4B'
+    SIZE = 6
 
     @classmethod
-    def pack(cls, bits: int) -> bytes:
+    def pack(cls, bits: int, fan_reason: int = 0, mist_reason: int = 0, 
+             light_reason: int = 0, heater_reason: int = 0) -> bytes:
+        """Pack actuator status bits and reason codes
+        
+        Args:
+            bits: Status bitfield (u16)
+            fan_reason: Fan reason code (0-255)
+            mist_reason: Mist reason code (0-255)
+            light_reason: Light reason code (0-255)
+            heater_reason: Heater reason code (0-255)
+            
+        Returns:
+            Packed 6-byte payload
+        """
         try:
-            return struct.pack(cls.FORMAT, bits & 0xFFFF)
+            return struct.pack(cls.FORMAT, 
+                             bits & 0xFFFF,
+                             fan_reason & 0xFF,
+                             mist_reason & 0xFF,
+                             light_reason & 0xFF,
+                             heater_reason & 0xFF)
         except Exception as e:
             logger.error(f"Error packing actuator status bits: {e}")
             raise SerializationError(f"Failed to pack actuator status bits: {e}")
 
     @classmethod
-    def unpack(cls, data: bytes) -> int:
+    def unpack(cls, data: bytes) -> tuple:
+        """Unpack actuator status bits and reason codes
+        
+        Returns:
+            Tuple of (bits, fan_reason, mist_reason, light_reason, heater_reason)
+        """
         if len(data) != cls.SIZE:
             raise SerializationError(f"Invalid actuator status length: {len(data)} (expected {cls.SIZE})")
         try:
-            return struct.unpack(cls.FORMAT, data)[0]
+            return struct.unpack(cls.FORMAT, data)
         except Exception as e:
             logger.error(f"Error unpacking actuator status bits: {e}")
             raise SerializationError(f"Failed to unpack actuator status bits: {e}")
@@ -561,10 +590,10 @@ class DataConverter:
             stage: Stage state to convert
             
         Returns:
-            Dictionary representation
+            Dictionary representation with numeric mode (0=FULL, 1=SEMI, 2=MANUAL)
         """
         return {
-            'mode': MODE_NAMES[stage.mode] if stage.mode < 3 else 'MANUAL',
+            'mode': stage.mode,  # Keep numeric: 0=FULL, 1=SEMI, 2=MANUAL (not string)
             'species': SPECIES_REVERSE_MAP.get(stage.species_id, 'Unknown'),
             'stage': STAGE_REVERSE_MAP.get(stage.stage_id, 'Unknown'),
             'stage_start_ts': stage.stage_start_ts,
@@ -587,6 +616,7 @@ class DataConverter:
             'mist_override': bool(bits & OverrideBits.MIST),
             'heater_override': bool(bits & OverrideBits.HEATER),
             'disable_automation': bool(bits & OverrideBits.DISABLE_AUTO),
+            'emergency_stop': bool(bits & OverrideBits.EMERGENCY_STOP),
             'raw_bits': bits
         }
 

@@ -18,6 +18,7 @@ from ..sensors.dht22 import DHT22Sensor
 from ..sensors.light_sensor import LightSensor
 from ..sensors.base import SCD41Error, DHT22Error, LightSensorError
 from ..core.config import config
+from ..integrations.thingspeak_client import publish_reading_to_thingspeak
 
 # Logging Setup
 logger = logging.getLogger(__name__)
@@ -162,9 +163,16 @@ class SensorManager:
                 
                 logger.debug(f"💾 Attempting to save reading to database: {reading.sensor_source}")
                 
-                # Save to database
+                # Save to local database (authoritative store)
                 self.db_manager.save_reading(reading)
                 logger.debug("✅ Reading saved to database")
+
+                # Optionally replicate to ThingSpeak if enabled and rate limit permits
+                try:
+                    publish_reading_to_thingspeak(reading)
+                except Exception as ts_err:
+                    # Any unexpected error here should not break the monitoring loop
+                    logger.error(f"Unexpected error during ThingSpeak publish: {ts_err}", exc_info=True)
                 
                 # Log current status
                 self._log_reading_status(reading)

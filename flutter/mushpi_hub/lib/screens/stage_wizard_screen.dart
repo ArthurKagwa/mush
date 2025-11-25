@@ -228,6 +228,8 @@ class _StageWizardScreenState extends ConsumerState<StageWizardScreen>
           _species = stageState.species;
           _mode = stageState.mode;
           _currentStage = stageState.stage;
+          // Note: stageStartTime is when the CURRENT stage started, not planting date
+          // We'll calculate the actual planting date after loading all stage thresholds
           _datePlanted = stageState.stageStartTime;
         });
       } else {
@@ -260,6 +262,7 @@ class _StageWizardScreenState extends ConsumerState<StageWizardScreen>
               'lightMode': thresholds.lightMode,
               'lightOnMinutes': thresholds.lightOnMinutes,
               'lightOffMinutes': thresholds.lightOffMinutes,
+              'start_time': thresholds.startTime,
             };
 
             // Update controllers
@@ -294,6 +297,32 @@ class _StageWizardScreenState extends ConsumerState<StageWizardScreen>
           );
           _loadDefaultValuesForStage(stage);
         }
+      }
+
+      // Set planting date from Incubation stage's start_time (if available)
+      if (_stageConfigs[GrowthStage.incubation]?['start_time'] != null) {
+        try {
+          final incubationStartTime = DateTime.parse(
+            _stageConfigs[GrowthStage.incubation]!['start_time'] as String,
+          );
+          setState(() {
+            _datePlanted = incubationStartTime;
+          });
+          developer.log(
+            '🌱 Planting date loaded from Incubation start_time: $_datePlanted',
+            name: 'mushpi.stage_wizard',
+          );
+        } catch (e) {
+          developer.log(
+            '⚠️ Could not parse Incubation start_time: $e',
+            name: 'mushpi.stage_wizard',
+          );
+        }
+      } else {
+        developer.log(
+          '⚠️ No start_time found in Incubation thresholds, using current stage start',
+          name: 'mushpi.stage_wizard',
+        );
       }
 
       developer.log(
@@ -383,6 +412,7 @@ class _StageWizardScreenState extends ConsumerState<StageWizardScreen>
           lightOnMinutes: lightOnMinutes,
           lightOffMinutes: lightOffMinutes,
           expectedDays: config['expectedDays'] as int?,
+          startTime: config['start_time'] as String?,
         );
 
         await bleOps.writeStageThresholds(thresholds);
@@ -398,13 +428,11 @@ class _StageWizardScreenState extends ConsumerState<StageWizardScreen>
         name: 'mushpi.stage_wizard',
       );
 
-      // Show success message - user can navigate away using bottom tabs
-      // Note: We don't call Navigator.pop() because this is a tab screen,
-      // not a pushed route. Calling pop() would try to remove the entire
-      // tab from the stack, causing "popped last page off stack" error.
+      // Show success message and return to first page
       setState(() {
         _hasChanges = false;
         _successMessage = 'All settings applied successfully!';
+        _currentStep = 0; // Return to page one
       });
 
       // Clear success message after a few seconds
@@ -981,6 +1009,27 @@ class _StageWizardScreenState extends ConsumerState<StageWizardScreen>
         ),
         const SizedBox(height: 24),
 
+        // Stage Start Date (optional)
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.event),
+            title: Text(
+              _getStageStartDate(stage) != null
+                  ? _formatDate(_getStageStartDate(stage)!)
+                  : 'Not set (will use current time when stage starts)',
+            ),
+            subtitle: Text(
+              stage == GrowthStage.incubation
+                  ? 'When was this batch started?'
+                  : 'When did this stage begin?',
+            ),
+            trailing: const Icon(Icons.edit),
+            onTap: () => _pickStageStartDate(stage),
+          ),
+        ),
+
+        const SizedBox(height: 24),
+
         // Expected Duration
         TextField(
           controller: controllers['expectedDays'],
@@ -1232,6 +1281,12 @@ class _StageWizardScreenState extends ConsumerState<StageWizardScreen>
       '${stage.displayName} Stage',
       Icons.timeline,
       [
+        if (_getStageStartDate(stage) != null)
+          _buildReviewItem(
+            'Start Date',
+            _formatDate(_getStageStartDate(stage)!),
+            () => _jumpToStep(stepIndex),
+          ),
         _buildReviewItem(
           'Expected Duration',
           '${controllers['expectedDays']!.text} days',
@@ -1389,6 +1444,70 @@ class _StageWizardScreenState extends ConsumerState<StageWizardScreen>
         timeOfDay.hour,
         timeOfDay.minute,
       );
+
+      // Store the planting date as the start_time for Incubation stage
+      if (_stageConfigs.containsKey(GrowthStage.incubation)) {
+        _stageConfigs[GrowthStage.incubation]!['start_time'] =
+            _datePlanted.toIso8601String();
+      }
+
+      _hasChanges = true;
+    });
+  }
+
+  /// Get stage start date from config, or null if not set
+  DateTime? _getStageStartDate(GrowthStage stage) {
+    final startTimeStr = _stageConfigs[stage]?['start_time'] as String?;
+    if (startTimeStr != null) {
+      try {
+        return DateTime.parse(startTimeStr);
+      } catch (e) {
+        developer.log('Failed to parse start_time: $e',
+            name: 'mushpi.stage_wizard');
+      }
+    }
+    return null;
+  }
+
+  /// Pick start date for a specific stage
+  Future<void> _pickStageStartDate(GrowthStage stage) async {
+    final now = DateTime.now();
+    final firstDate = now.subtract(const Duration(days: 365));
+    final lastDate = now;
+
+    // Get current date or default to now
+    DateTime initialDate = _getStageStartDate(stage) ?? now;
+    if (initialDate.isBefore(firstDate) || initialDate.isAfter(lastDate)) {
+      initialDate = now;
+    }
+
+    if (!mounted) return;
+
+    final date = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
+    );
+
+    if (date == null || !mounted) return;
+
+    final timeOfDay = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initialDate),
+    );
+
+    if (timeOfDay == null || !mounted) return;
+
+    setState(() {
+      final selectedDate = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        timeOfDay.hour,
+        timeOfDay.minute,
+      );
+      _stageConfigs[stage]!['start_time'] = selectedDate.toIso8601String();
       _hasChanges = true;
     });
   }

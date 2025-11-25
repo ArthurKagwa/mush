@@ -233,6 +233,28 @@ final statusFlagsStreamProvider = StreamProvider<int>((ref) {
   return bleRepository.statusFlagsStream;
 });
 
+/// Actuator status stream provider
+///
+/// Provides real-time hardware relay states from the connected BLE device.
+/// This shows the ACTUAL state of relays (light, fan, mist, heater) as
+/// reported by the Pi control system, not target states.
+///
+/// Returns null if the characteristic is not available (older firmware).
+///
+/// Usage:
+/// ```dart
+/// final actuatorStatus = ref.watch(actuatorStatusStreamProvider);
+/// actuatorStatus.when(
+///   data: (status) => Text('Light: ${status.lightOn ? "ON" : "OFF"}'),
+///   loading: () => CircularProgressIndicator(),
+///   error: (err, stack) => Text('Error: $err'),
+/// );
+/// ```
+final actuatorStatusStreamProvider = StreamProvider<ActuatorStatusData>((ref) {
+  final bleRepository = ref.watch(bleRepositoryProvider);
+  return bleRepository.actuatorStatusStream;
+});
+
 /// BLE operations provider - provides methods for BLE operations
 ///
 /// This provider offers convenient methods for common BLE operations:
@@ -614,6 +636,25 @@ class BLEOperations {
     } catch (error, stackTrace) {
       developer.log(
         'Error reading status flags',
+        name: 'mushpi.providers.ble.ops',
+        error: error,
+        stackTrace: stackTrace,
+        level: 1000,
+      );
+      return null;
+    }
+  }
+
+  /// Read actuator status (real-time relay states) from the device
+  ///
+  /// Returns the current state of all hardware relays.
+  /// Returns null if the characteristic is not available or on error.
+  Future<ActuatorStatusData?> readActuatorStatus() async {
+    try {
+      return await repository.readActuatorStatus();
+    } catch (error, stackTrace) {
+      developer.log(
+        'Error reading actuator status',
         name: 'mushpi.providers.ble.ops',
         error: error,
         stackTrace: stackTrace,

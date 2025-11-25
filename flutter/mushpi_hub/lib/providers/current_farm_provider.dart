@@ -6,6 +6,7 @@ import 'package:mushpi_hub/core/constants/ble_constants.dart';
 import 'package:mushpi_hub/data/repositories/farm_repository.dart';
 import 'package:mushpi_hub/providers/database_provider.dart';
 import 'package:mushpi_hub/providers/farms_provider.dart';
+import 'package:mushpi_hub/data/repositories/thingspeak_repository.dart';
 import 'dart:developer' as developer;
 import 'dart:async';
 
@@ -26,6 +27,7 @@ final selectedMonitoringFarmIdProvider = StateProvider<String?>((ref) => null);
 /// Latest reading for selected monitoring farm provider
 ///
 /// Provides the most recent environmental reading for the farm selected in monitoring screen.
+/// If farm is offline (not BLE connected), attempts to fetch from ThingSpeak.
 ///
 /// Usage:
 /// ```dart
@@ -45,30 +47,125 @@ final selectedMonitoringFarmLatestReadingProvider =
   }
 
   final readingsDao = ref.watch(readingsDaoProvider);
+  final farm = await ref.watch(farmByIdProvider(farmId).future);
+  final tsRepo = ThingSpeakRepository();
   
-  try {
-    final reading = await readingsDao.getLatestReadingByFarm(farmId);
-    
-    if (reading == null) {
+  // Check if farm is online (BLE connected) - lastActive within 1 minute
+  final isBleConnected = farm?.lastActive != null &&
+      DateTime.now().difference(farm!.lastActive!).inMinutes < 1;
+
+  // If BLE connected, use local data
+  if (isBleConnected) {
+    try {
+      final reading = await readingsDao.getLatestReadingByFarm(farmId);
+      
+      if (reading == null) {
+        return null;
+      }
+
+      return EnvironmentalReading(
+        co2Ppm: reading.co2Ppm,
+        temperatureC: reading.temperatureC,
+        relativeHumidity: reading.relativeHumidity,
+        lightRaw: reading.lightRaw,
+        timestamp: reading.timestamp,
+      );
+    } catch (error, stackTrace) {
+      developer.log(
+        'Failed to get latest reading for monitoring',
+        name: 'mushpi.providers.current_farm',
+        error: error,
+        stackTrace: stackTrace,
+        level: 1000,
+      );
       return null;
     }
+  } else {
+    // If not BLE connected, try ThingSpeak if enabled
+    if (tsRepo.isEnabled) {
+      try {
+        // First try local DB
+        final localReading = await readingsDao.getLatestReadingByFarm(farmId);
+        
+        // Then try ThingSpeak
+        final tsReading = await tsRepo.fetchLatestReading(farmId: farmId);
+        
+        // Prefer ThingSpeak if it's newer, otherwise use local
+        if (tsReading != null) {
+          if (localReading == null ||
+              tsReading.timestamp.isAfter(localReading.timestamp)) {
+            return EnvironmentalReading(
+              co2Ppm: tsReading.co2Ppm,
+              temperatureC: tsReading.temperatureC,
+              relativeHumidity: tsReading.relativeHumidity,
+              lightRaw: tsReading.lightRaw,
+              timestamp: tsReading.timestamp,
+            );
+          }
+        }
+        
+        // Fall back to local if ThingSpeak is older or unavailable
+        if (localReading != null) {
+          return EnvironmentalReading(
+            co2Ppm: localReading.co2Ppm,
+            temperatureC: localReading.temperatureC,
+            relativeHumidity: localReading.relativeHumidity,
+            lightRaw: localReading.lightRaw,
+            timestamp: localReading.timestamp,
+          );
+        }
+        
+        return null;
+      } catch (error, stackTrace) {
+        developer.log(
+          'Failed to get latest reading (ThingSpeak fallback)',
+          name: 'mushpi.providers.current_farm',
+          error: error,
+          stackTrace: stackTrace,
+          level: 1000,
+        );
+        // Try local as fallback
+        try {
+          final reading = await readingsDao.getLatestReadingByFarm(farmId);
+          if (reading != null) {
+            return EnvironmentalReading(
+              co2Ppm: reading.co2Ppm,
+              temperatureC: reading.temperatureC,
+              relativeHumidity: reading.relativeHumidity,
+              lightRaw: reading.lightRaw,
+              timestamp: reading.timestamp,
+            );
+          }
+        } catch (_) {}
+        return null;
+      }
+    } else {
+      // No ThingSpeak, just use local data
+      try {
+        final reading = await readingsDao.getLatestReadingByFarm(farmId);
+        
+        if (reading == null) {
+          return null;
+        }
 
-    return EnvironmentalReading(
-      co2Ppm: reading.co2Ppm,
-      temperatureC: reading.temperatureC,
-      relativeHumidity: reading.relativeHumidity,
-      lightRaw: reading.lightRaw,
-      timestamp: reading.timestamp,
-    );
-  } catch (error, stackTrace) {
-    developer.log(
-      'Failed to get latest reading for monitoring',
-      name: 'mushpi.providers.current_farm',
-      error: error,
-      stackTrace: stackTrace,
-      level: 1000,
-    );
-    return null;
+        return EnvironmentalReading(
+          co2Ppm: reading.co2Ppm,
+          temperatureC: reading.temperatureC,
+          relativeHumidity: reading.relativeHumidity,
+          lightRaw: reading.lightRaw,
+          timestamp: reading.timestamp,
+        );
+      } catch (error, stackTrace) {
+        developer.log(
+          'Failed to get latest reading for monitoring',
+          name: 'mushpi.providers.current_farm',
+          error: error,
+          stackTrace: stackTrace,
+          level: 1000,
+        );
+        return null;
+      }
+    }
   }
 });
 

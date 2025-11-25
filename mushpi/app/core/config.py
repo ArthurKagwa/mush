@@ -158,6 +158,25 @@ class DevelopmentConfig:
     test_mode: bool
 
 
+@dataclass
+class ThingSpeakConfig:
+    """ThingSpeak integration configuration
+
+    All values are driven by environment variables to avoid hardcoded settings.
+    If `enabled` is False, the integration is completely inactive.
+    """
+    enabled: bool
+    api_key: str
+    channel_id: str
+    update_url: str
+    field_temperature: str
+    field_humidity: str
+    field_co2: str
+    field_light: str
+    min_interval_seconds: int
+    timeout_seconds: int
+
+
 class ConfigurationManager:
     """Centralized configuration management with environment variables"""
     
@@ -315,6 +334,22 @@ class ConfigurationManager:
             simulation_mode=self._get_env_var('MUSHPI_SIMULATION_MODE', False, bool),
             debug_mode=self._get_env_var('MUSHPI_DEBUG_MODE', False, bool),
             test_mode=self._get_env_var('MUSHPI_TEST_MODE', False, bool)
+        )
+        
+        # ThingSpeak (cloud data repository)
+        self.thingspeak = ThingSpeakConfig(
+            enabled=self._get_env_var('MUSHPI_THINGSPEAK_ENABLED', False, bool),
+            api_key=self._get_env_var('MUSHPI_THINGSPEAK_API_KEY', '', str),
+            channel_id=self._get_env_var('MUSHPI_THINGSPEAK_CHANNEL_ID', '', str),
+            update_url=self._get_env_var('MUSHPI_THINGSPEAK_UPDATE_URL', 'https://api.thingspeak.com/update', str),
+            field_temperature=self._get_env_var('MUSHPI_THINGSPEAK_FIELD_TEMPERATURE', '', str),
+            field_humidity=self._get_env_var('MUSHPI_THINGSPEAK_FIELD_HUMIDITY', '', str),
+            field_co2=self._get_env_var('MUSHPI_THINGSPEAK_FIELD_CO2', '', str),
+            field_light=self._get_env_var('MUSHPI_THINGSPEAK_FIELD_LIGHT', '', str),
+            # Default: publish at most every 5 minutes (300 seconds)
+            min_interval_seconds=self._get_env_var('MUSHPI_THINGSPEAK_MIN_INTERVAL', 300, int),
+            # Default network timeout for ThingSpeak calls
+            timeout_seconds=self._get_env_var('MUSHPI_THINGSPEAK_TIMEOUT', 5, int),
         )
         
         # Thresholds path (special handling for relative/absolute paths)

@@ -198,6 +198,78 @@ class BLEDataSerializer {
     final buffer = ByteData.sublistView(Uint8List.fromList(data));
     return buffer.getUint32(0, Endian.little);
   }
+
+  /// Parse actuator status (2 bytes)
+  ///
+  /// Real-time relay states from the control system.
+  /// These reflect the ACTUAL hardware relay positions, not target states.
+  ///
+  /// Format (little-endian): <H4B (6 bytes total)
+  /// - Bytes 0-1: Actuator status bits (unsigned 16-bit bit field)
+  /// - Bit 0: LIGHT - Grow light relay ON
+  /// - Bit 1: FAN - Exhaust fan relay ON
+  /// - Bit 2: MIST - Humidifier/mister relay ON
+  /// - Bit 3: HEATER - Heater relay ON
+  /// - Byte 2: FAN reason code (0-255)
+  /// - Byte 3: MIST reason code (0-255)
+  /// - Byte 4: LIGHT reason code (0-255)
+  /// - Byte 5: HEATER reason code (0-255)
+  static ActuatorStatusData parseActuatorStatus(List<int> data) {
+    // Handle invalid data gracefully - return all relays OFF
+    if (data.isEmpty) {
+      developer.log(
+        '⚠️ Actuator status: empty data received, returning default (all OFF)',
+        name: 'BLEDataSerializer.parseActuatorStatus',
+      );
+      return const ActuatorStatusData(
+        lightOn: false,
+        fanOn: false,
+        mistOn: false,
+        heaterOn: false,
+      );
+    }
+
+    if (data.length != BLEConstants.actuatorDataSize) {
+      developer.log(
+        '⚠️ Actuator status: invalid length ${data.length} bytes '
+        '(expected ${BLEConstants.actuatorDataSize}), returning default (all OFF)',
+        name: 'BLEDataSerializer.parseActuatorStatus',
+        level: 900, // WARNING
+      );
+      return const ActuatorStatusData(
+        lightOn: false,
+        fanOn: false,
+        mistOn: false,
+        heaterOn: false,
+      );
+    }
+
+    final buffer = ByteData.sublistView(Uint8List.fromList(data));
+    final status = buffer.getUint16(0, Endian.little);
+
+    // Extract reason codes from bytes 2-5
+    final fanReasonCode = buffer.getUint8(2);
+    final mistReasonCode = buffer.getUint8(3);
+    final lightReasonCode = buffer.getUint8(4);
+    final heaterReasonCode = buffer.getUint8(5);
+
+    developer.log(
+      '✓ Actuator status parsed: bits=0x${status.toRadixString(16).padLeft(4, '0')}, '
+      'reasons=[fan:$fanReasonCode, mist:$mistReasonCode, light:$lightReasonCode, heater:$heaterReasonCode]',
+      name: 'BLEDataSerializer.parseActuatorStatus',
+    );
+
+    return ActuatorStatusData(
+      lightOn: (status & ActuatorBits.light) != 0,
+      fanOn: (status & ActuatorBits.fan) != 0,
+      mistOn: (status & ActuatorBits.mist) != 0,
+      heaterOn: (status & ActuatorBits.heater) != 0,
+      fanReasonCode: fanReasonCode,
+      mistReasonCode: mistReasonCode,
+      lightReasonCode: lightReasonCode,
+      heaterReasonCode: heaterReasonCode,
+    );
+  }
 }
 
 /// Environmental reading data class
@@ -275,6 +347,58 @@ class ControlTargetsData {
   }
 }
 
+/// Actuator status data class
+///
+/// Real-time relay states from the control system.
+/// These reflect the ACTUAL hardware relay positions reported by the Pi,
+/// not target states or override settings.
+class ActuatorStatusData {
+  final bool lightOn;
+  final bool fanOn;
+  final bool mistOn;
+  final bool heaterOn;
+  final int fanReasonCode;
+  final int mistReasonCode;
+  final int lightReasonCode;
+  final int heaterReasonCode;
+
+  const ActuatorStatusData({
+    required this.lightOn,
+    required this.fanOn,
+    required this.mistOn,
+    required this.heaterOn,
+    this.fanReasonCode = 0,
+    this.mistReasonCode = 0,
+    this.lightReasonCode = 0,
+    this.heaterReasonCode = 0,
+  });
+
+  /// Count active (ON) relays
+  int get activeCount {
+    int count = 0;
+    if (lightOn) count++;
+    if (fanOn) count++;
+    if (mistOn) count++;
+    if (heaterOn) count++;
+    return count;
+  }
+
+  /// Check if all relays are OFF
+  bool get allOff => !lightOn && !fanOn && !mistOn && !heaterOn;
+
+  /// Check if any relay is ON
+  bool get anyOn => lightOn || fanOn || mistOn || heaterOn;
+
+  @override
+  String toString() {
+    return 'ActuatorStatus('
+        'light: ${lightOn ? "ON" : "OFF"}(reason: $lightReasonCode), '
+        'fan: ${fanOn ? "ON" : "OFF"}(reason: $fanReasonCode), '
+        'mist: ${mistOn ? "ON" : "OFF"}(reason: $mistReasonCode), '
+        'heater: ${heaterOn ? "ON" : "OFF"}(reason: $heaterReasonCode))';
+  }
+}
+
 /// Stage state data class
 class StageStateData {
   final ControlMode mode;
@@ -324,6 +448,7 @@ class StageThresholdsData {
   final int? lightOnMinutes;
   final int? lightOffMinutes;
   final int? expectedDays;
+  final String? startTime; // ISO 8601 timestamp when this stage started
 
   const StageThresholdsData({
     required this.species,
@@ -337,6 +462,7 @@ class StageThresholdsData {
     this.lightOnMinutes,
     this.lightOffMinutes,
     this.expectedDays,
+    this.startTime,
   });
 
   /// Create from JSON (BLE read response)
@@ -386,6 +512,7 @@ class StageThresholdsData {
       lightOnMinutes: lightOnMinutes,
       lightOffMinutes: lightOffMinutes,
       expectedDays: (json['expected_days'] as num?)?.toInt(),
+      startTime: json['start_time'] as String?,
     );
   }
 
@@ -402,6 +529,7 @@ class StageThresholdsData {
     if (rhMax != null) json['rh_max'] = rhMax;
     if (co2Max != null) json['co2_max'] = co2Max;
     if (expectedDays != null) json['expected_days'] = expectedDays;
+    if (startTime != null) json['start_time'] = startTime;
 
     if (lightMode != null ||
         lightOnMinutes != null ||

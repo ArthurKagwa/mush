@@ -10,7 +10,7 @@ import threading
 import time
 import os
 from typing import Optional, Dict, Any, Callable, Set, Tuple
-from queue import Queue, Empty
+from queue import Queue, Empty, PriorityQueue
 
 try:
     from bluezero import adapter, peripheral
@@ -82,16 +82,28 @@ class BLEGATTServiceManager:
         self._mainloop = None
         self._mainloop_thread = None
 
-        # Non-blocking notification infrastructure
-        self._notify_queue: Optional[Queue] = None
+        # Non-blocking notification infrastructure (priority-based)
+        self._notify_queue: Optional[PriorityQueue] = None
         self._publisher_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._queue_metrics = {
             'dropped': 0,
             'coalesced': 0,
             'published': 0,
-            'slow_publishes': 0
+            'slow_publishes': 0,
+            'critical_published': 0,
+            'high_published': 0,
+            'medium_published': 0,
+            'low_published': 0,
+            'critical_dropped': 0,
+            'low_dropped': 0
         }
+        
+        # Priority levels (lower number = higher priority)
+        self.PRIORITY_CRITICAL = 0  # env_measurements, actuator_status (never drop)
+        self.PRIORITY_HIGH = 1      # status_flags
+        self.PRIORITY_MEDIUM = 2    # control_targets, stage_state
+        self.PRIORITY_LOW = 3       # stage_thresholds, config updates
 
         # Load BLE queue related configuration from environment (no hard-coded values)
         self._ble_cfg = self._load_ble_env_config()
@@ -756,7 +768,16 @@ class BLEGATTServiceManager:
 
         # Log queue metrics if worker active
         if self._notify_queue is not None:
-            logger.info(f"Queue size: {self._notify_queue.qsize()} | Published: {self._queue_metrics['published']} | Dropped: {self._queue_metrics['dropped']} | Coalesced: {self._queue_metrics['coalesced']} | Slow publishes: {self._queue_metrics['slow_publishes']}")
+            logger.info(f"📊 Queue: {self._notify_queue.qsize()}/{self._ble_cfg['queue_max_size']} | "
+                       f"Published: {self._queue_metrics['published']} "
+                       f"(C:{self._queue_metrics['critical_published']} "
+                       f"H:{self._queue_metrics['high_published']} "
+                       f"M:{self._queue_metrics['medium_published']} "
+                       f"L:{self._queue_metrics['low_published']}) | "
+                       f"Dropped: {self._queue_metrics['dropped']} "
+                       f"(C:{self._queue_metrics['critical_dropped']} "
+                       f"L:{self._queue_metrics['low_dropped']}) | "
+                       f"Slow: {self._queue_metrics['slow_publishes']}")
 
 
     # ----------------------- D-Bus advertisement helpers -----------------------
@@ -1025,9 +1046,9 @@ class BLEGATTServiceManager:
             return str(val).lower() in ('true', '1', 'yes', 'on')
 
         return {
-            'queue_max_size': _get_int('MUSHPI_BLE_QUEUE_MAX_SIZE', 64),
+            'queue_max_size': _get_int('MUSHPI_BLE_QUEUE_MAX_SIZE', 16),
             'queue_put_timeout_ms': _get_int('MUSHPI_BLE_QUEUE_PUT_TIMEOUT_MS', 10),
-            'backpressure_policy': _get_str('MUSHPI_BLE_BACKPRESSURE_POLICY', 'drop_oldest', {'drop_oldest', 'drop_newest', 'coalesce'}),
+            'backpressure_policy': _get_str('MUSHPI_BLE_BACKPRESSURE_POLICY', 'priority', {'drop_oldest', 'drop_newest', 'coalesce', 'priority'}),
             'publish_timeout_ms': _get_int('MUSHPI_BLE_PUBLISH_TIMEOUT_MS', 2000),
             'publish_max_retries': _get_int('MUSHPI_BLE_PUBLISH_MAX_RETRIES', 2),
             'publish_backoff_base_ms': _get_int('MUSHPI_BLE_PUBLISH_BACKOFF_BASE_MS', 100),
@@ -1041,36 +1062,52 @@ class BLEGATTServiceManager:
             'adv_register_retries': _get_int('MUSHPI_BLE_ADV_REGISTER_RETRIES', 0),
             'adv_backoff_base_ms': _get_int('MUSHPI_BLE_ADV_REGISTER_BACKOFF_MS', 0),
             'adv_backoff_max_ms': _get_int('MUSHPI_BLE_ADV_REGISTER_BACKOFF_MAX_MS', 0),
-            # Feature gates (default off for backward compatibility)
-            'actuator_status_enable': _get_bool('MUSHPI_BLE_ACTUATOR_STATUS_ENABLE', False),
+            # Feature gates
+            'actuator_status_enable': _get_bool('MUSHPI_BLE_ACTUATOR_STATUS_ENABLE', True),  # Enabled by default for real-time relay states
         }
 
     def _init_notification_worker(self):
-        """Initialize queue and start publisher worker thread"""
+        """Initialize priority queue and start publisher worker thread"""
         if self.simulation_mode:
             logger.debug("Skipping notification worker init (simulation mode)")
             return
         if self._notify_queue is None:
-            self._notify_queue = Queue(maxsize=self._ble_cfg['queue_max_size'])
+            self._notify_queue = PriorityQueue(maxsize=self._ble_cfg['queue_max_size'])
         if self._publisher_thread and self._publisher_thread.is_alive():
             return
 
         def _worker():
-            logger.info("BLE notification worker started")
+            logger.info("BLE notification worker started with priority queue")
             while not self._stop_event.is_set():
                 try:
                     item = self._notify_queue.get(timeout=0.25)
                 except Empty:
                     continue
                 try:
-                    char_name, devices_snapshot, enqueue_ts = item
+                    priority, timestamp, char_name, devices_snapshot = item
                     start_ts = time.time()
                     self._process_notification(char_name, devices_snapshot)
                     duration_ms = int((time.time() - start_ts) * 1000)
+                    
+                    # Update priority-specific metrics
+                    if priority == self.PRIORITY_CRITICAL:
+                        self._queue_metrics['critical_published'] += 1
+                    elif priority == self.PRIORITY_HIGH:
+                        self._queue_metrics['high_published'] += 1
+                    elif priority == self.PRIORITY_MEDIUM:
+                        self._queue_metrics['medium_published'] += 1
+                    else:
+                        self._queue_metrics['low_published'] += 1
+                    
                     if duration_ms > self._ble_cfg['log_slow_publish_ms']:
                         self._queue_metrics['slow_publishes'] += 1
-                        logger.warning(f"Slow BLE publish: {duration_ms}ms for {char_name}")
+                        logger.warning(f"Slow BLE publish: {duration_ms}ms for {char_name} (P{priority})")
+                    
                     self._queue_metrics['published'] += 1
+                    
+                    # Log queue status on every notification
+                    self._log_queue_status(char_name, priority, duration_ms)
+                    
                 except Exception as e:
                     logger.error(f"Worker error processing notification: {e}")
                 finally:
@@ -1080,8 +1117,26 @@ class BLEGATTServiceManager:
         self._publisher_thread = threading.Thread(target=_worker, name="BLEPublisher", daemon=True)
         self._publisher_thread.start()
 
+    def _get_priority(self, char_name: str) -> int:
+        """Get priority level for a characteristic
+        
+        Args:
+            char_name: Name of the characteristic
+            
+        Returns:
+            Priority level (0=critical, 3=low)
+        """
+        if char_name in ('env_measurements', 'actuator_status'):
+            return self.PRIORITY_CRITICAL
+        elif char_name == 'status_flags':
+            return self.PRIORITY_HIGH
+        elif char_name in ('control_targets', 'stage_state'):
+            return self.PRIORITY_MEDIUM
+        else:
+            return self.PRIORITY_LOW
+    
     def _enqueue_notification(self, char_name: str, devices: Set[str]):
-        """Enqueue a notification task with backpressure handling.
+        """Enqueue a notification task with priority-based backpressure handling.
 
         Args:
             char_name: characteristic key in self.characteristics
@@ -1091,13 +1146,85 @@ class BLEGATTServiceManager:
             return
         if not self._notify_queue:
             return
-        task: Tuple[str, Set[str], float] = (char_name, set(devices), time.time())
+        
+        priority = self._get_priority(char_name)
+        timestamp = time.time()
+        task: Tuple[int, float, str, Set[str]] = (priority, timestamp, char_name, set(devices))
+        
         try:
             self._notify_queue.put(task, timeout=self._ble_cfg['queue_put_timeout_ms']/1000.0)
         except Exception:
             # Queue full or put timeout: apply backpressure policy
             policy = self._ble_cfg['backpressure_policy']
-            if policy == 'drop_newest':
+            
+            if policy == 'priority':
+                # Priority-based dropping: remove lowest priority item if current is higher priority
+                try:
+                    # Peek at queue to find lowest priority item
+                    # For PriorityQueue, we need to rebuild without lowest priority items
+                    temp_items = []
+                    lowest_priority_found = False
+                    
+                    # Extract all items
+                    while not self._notify_queue.empty():
+                        try:
+                            item = self._notify_queue.get_nowait()
+                            temp_items.append(item)
+                            self._notify_queue.task_done()
+                        except Empty:
+                            break
+                    
+                    # Find and drop lowest priority item (highest number) if current is higher priority
+                    if temp_items:
+                        temp_items.sort(key=lambda x: x[0])  # Sort by priority
+                        lowest_item = temp_items[-1]  # Highest priority number = lowest priority
+                        
+                        if priority < lowest_item[0]:  # Current is higher priority
+                            # Drop lowest priority item
+                            temp_items = temp_items[:-1]
+                            lowest_priority_found = True
+                            self._queue_metrics['dropped'] += 1
+                            if lowest_item[0] == self.PRIORITY_LOW:
+                                self._queue_metrics['low_dropped'] += 1
+                            logger.info(f"🗑️  Dropped {lowest_item[2]} (P{lowest_item[0]}) for {char_name} (P{priority})")
+                        else:
+                            # Current item is low priority, drop it instead
+                            self._queue_metrics['dropped'] += 1
+                            if priority == self.PRIORITY_CRITICAL:
+                                self._queue_metrics['critical_dropped'] += 1
+                                logger.warning(f"⚠️  CRITICAL item dropped: {char_name}")
+                            elif priority == self.PRIORITY_LOW:
+                                self._queue_metrics['low_dropped'] += 1
+                            logger.debug(f"Dropped incoming {char_name} (P{priority}) - queue full with higher priority items")
+                            # Put items back and return
+                            for item in temp_items:
+                                try:
+                                    self._notify_queue.put_nowait(item)
+                                except:
+                                    pass
+                            return
+                    
+                    # Put items back
+                    for item in temp_items:
+                        try:
+                            self._notify_queue.put_nowait(item)
+                        except:
+                            pass
+                    
+                    # Try to enqueue current item
+                    if lowest_priority_found:
+                        try:
+                            self._notify_queue.put(task, timeout=0.01)
+                            logger.debug(f"✅ Enqueued {char_name} (P{priority}) after dropping low priority item")
+                        except:
+                            self._queue_metrics['dropped'] += 1
+                            logger.debug(f"Failed to enqueue {char_name} after priority drop")
+                            
+                except Exception as e:
+                    self._queue_metrics['dropped'] += 1
+                    logger.debug(f"Priority backpressure error: {e}")
+                    
+            elif policy == 'drop_newest':
                 self._queue_metrics['dropped'] += 1
                 logger.debug(f"Drop newest notification ({char_name}) queue full")
                 return
@@ -1123,6 +1250,53 @@ class BLEGATTServiceManager:
                 self._queue_metrics['dropped'] += 1
                 logger.debug(f"Unknown backpressure policy {policy}; dropped newest")
 
+    def _log_queue_status(self, char_name: str, priority: int, duration_ms: int):
+        """Log queue status on every notification
+        
+        Args:
+            char_name: Name of the characteristic that was published
+            priority: Priority level of the published item
+            duration_ms: Time taken to publish in milliseconds
+        """
+        try:
+            queue_size = self._notify_queue.qsize()
+            queue_max = self._ble_cfg['queue_max_size']
+            queue_pct = int((queue_size / queue_max) * 100) if queue_max > 0 else 0
+            
+            # Priority names for logging
+            priority_names = {
+                self.PRIORITY_CRITICAL: 'CRITICAL',
+                self.PRIORITY_HIGH: 'HIGH',
+                self.PRIORITY_MEDIUM: 'MEDIUM',
+                self.PRIORITY_LOW: 'LOW'
+            }
+            priority_name = priority_names.get(priority, f'P{priority}')
+            
+            # Build status message
+            status = (
+                f"📡 BLE: {char_name} ({priority_name}) sent in {duration_ms}ms | "
+                f"Queue: {queue_size}/{queue_max} ({queue_pct}%) | "
+                f"Total: {self._queue_metrics['published']} "
+                f"[C:{self._queue_metrics['critical_published']} "
+                f"H:{self._queue_metrics['high_published']} "
+                f"M:{self._queue_metrics['medium_published']} "
+                f"L:{self._queue_metrics['low_published']}] | "
+                f"Dropped: {self._queue_metrics['dropped']} "
+                f"[C:{self._queue_metrics['critical_dropped']} "
+                f"L:{self._queue_metrics['low_dropped']}]"
+            )
+            
+            # Log at appropriate level based on queue fullness
+            if queue_pct > 80:
+                logger.warning(status + " ⚠️ QUEUE NEARLY FULL")
+            elif queue_pct > 50:
+                logger.info(status + " ⚠️")
+            else:
+                logger.info(status)
+                
+        except Exception as e:
+            logger.debug(f"Error logging queue status: {e}")
+    
     def _process_notification(self, char_name: str, devices: Set[str]):
         """Process a single queued notification task"""
         char = self.characteristics.get(char_name)

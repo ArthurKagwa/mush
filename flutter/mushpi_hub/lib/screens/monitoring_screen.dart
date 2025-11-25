@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../providers/farms_provider.dart';
 import '../providers/current_farm_provider.dart';
 import '../providers/actuator_state_provider.dart';
+import '../data/models/relay_reason_code.dart';
 import '../providers/ble_provider.dart';
 import '../core/constants/ble_constants.dart';
 import '../core/utils/ble_serializer.dart';
@@ -742,12 +743,19 @@ class _EnvironmentalOverviewCard extends ConsumerWidget {
 
   final Farm farm;
 
+  bool get _isBleConnected {
+    if (farm.lastActive == null) return false;
+    return DateTime.now().difference(farm.lastActive!).inMinutes < 1;
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     // Watch the latest reading for the selected farm
     final readingAsync = ref.watch(selectedMonitoringFarmLatestReadingProvider);
+    final isBleConnected = _isBleConnected;
 
     return Card(
+      elevation: 2,
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -758,9 +766,44 @@ class _EnvironmentalOverviewCard extends ConsumerWidget {
                 Expanded(
                   child: Text(
                     'Environmental Data',
-                    style: Theme.of(context).textTheme.titleMedium,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
                   ),
                 ),
+                // Mode indicator (Local/Online)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: isBleConnected
+                        ? Colors.green.withOpacity(0.15)
+                        : Colors.blue.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isBleConnected ? Colors.green : Colors.blue,
+                      width: 1.5,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        isBleConnected ? Icons.bluetooth_connected : Icons.cloud,
+                        size: 16,
+                        color: isBleConnected ? Colors.green : Colors.blue,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        isBleConnected ? 'Local' : 'Online',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              color: isBleConnected ? Colors.green : Colors.blue,
+                              fontWeight: FontWeight.bold,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
                 readingAsync.when(
                   data: (reading) => reading != null
                       ? _TimestampChip(timestamp: reading.timestamp)
@@ -776,85 +819,109 @@ class _EnvironmentalOverviewCard extends ConsumerWidget {
             ),
             const SizedBox(height: 16),
             readingAsync.when(
-              data: (reading) {
-                if (reading == null) {
-                  return Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Text(
-                        'No sensor data available',
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                              color: Theme.of(context)
-                                  .colorScheme
-                                  .onSurfaceVariant,
-                            ),
+                data: (reading) {
+                  if (reading == null) {
+                    return Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Text(
+                          'No sensor data available',
+                          style:
+                              Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                        ),
                       ),
-                    ),
-                  );
-                }
+                    );
+                  }
 
-                return Column(
-                  children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _EnvironmentalMetric(
-                            icon: Icons.thermostat,
-                            label: 'Temperature',
-                            value:
-                                '${reading.temperatureC.toStringAsFixed(1)}°C',
-                            color: _getTemperatureColor(reading.temperatureC),
+                  return Column(
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _EnvironmentalMetric(
+                              icon: Icons.thermostat,
+                              label: 'Temperature',
+                              value:
+                                  '${reading.temperatureC.toStringAsFixed(1)}°C',
+                              color: _getTemperatureColor(reading.temperatureC),
+                            ),
                           ),
-                        ),
-                        Expanded(
-                          child: _EnvironmentalMetric(
-                            icon: Icons.water_drop,
-                            label: 'Humidity',
-                            value:
-                                '${reading.relativeHumidity.toStringAsFixed(0)}%',
-                            color: _getHumidityColor(reading.relativeHumidity),
+                          Expanded(
+                            child: _EnvironmentalMetric(
+                              icon: Icons.water_drop,
+                              label: 'Humidity',
+                              value:
+                                  '${reading.relativeHumidity.toStringAsFixed(0)}%',
+                              color:
+                                  _getHumidityColor(reading.relativeHumidity),
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _EnvironmentalMetric(
+                              icon: Icons.air,
+                              label: 'CO₂',
+                              value: '${reading.co2Ppm} ppm',
+                              color: _getCO2Color(reading.co2Ppm),
+                            ),
+                          ),
+                          Expanded(
+                            child: _EnvironmentalMetric(
+                              icon: Icons.light_mode,
+                              label: 'Light',
+                              value: reading.lightRaw.toString(),
+                              color: Colors.amber,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  );
+                },
+                loading: () => const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(32.0),
+                    child: CircularProgressIndicator(),
+                  ),
+                ),
+                error: (error, stack) => Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Text(
+                      'Error loading sensor data',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
                     ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _EnvironmentalMetric(
-                            icon: Icons.air,
-                            label: 'CO₂',
-                            value: '${reading.co2Ppm} ppm',
-                            color: _getCO2Color(reading.co2Ppm),
-                          ),
-                        ),
-                        Expanded(
-                          child: _EnvironmentalMetric(
-                            icon: Icons.light_mode,
-                            label: 'Light',
-                            value: reading.lightRaw.toString(),
-                            color: Colors.amber,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                );
-              },
-              loading: () => const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(32.0),
-                  child: CircularProgressIndicator(),
+                  ),
                 ),
               ),
-              error: (error, stack) => Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Text(
-                    'Error loading sensor data',
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: Theme.of(context).colorScheme.error,
-                        ),
+            const SizedBox(height: 16),
+            // Improved chart navigation button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () {
+                  context.push('/monitoring/charts');
+                  developer.log(
+                    'Navigating to environmental charts',
+                    name: 'mushpi.monitoring_screen',
+                  );
+                },
+                icon: const Icon(Icons.show_chart),
+                label: const Text('View Charts & Trends'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
                   ),
                 ),
               ),
@@ -1021,6 +1088,7 @@ class _ActuatorStateCard extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final targetsAsync = ref.watch(controlTargetsFutureProvider);
+    final actuatorStatusAsync = ref.watch(actuatorStatusStreamProvider);
 
     return Card(
       child: Padding(
@@ -1054,6 +1122,9 @@ class _ActuatorStateCard extends ConsumerWidget {
 
                 final theme = Theme.of(context);
 
+                // Get actuator status or null if not available
+                final actuatorStatus = actuatorStatusAsync.valueOrNull;
+
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -1069,37 +1140,44 @@ class _ActuatorStateCard extends ConsumerWidget {
                           subtitle: targets.lightMode == LightMode.cycle
                               ? 'On ${targets.onMinutes}m / Off ${targets.offMinutes}m'
                               : null,
+                          statusValue: actuatorStatus?.lightOn,
+                          reasonCode: actuatorStatus?.lightReasonCode,
                         ),
                         _ActuatorChip(
                           icon: Icons.air,
                           label: 'Fan',
                           value: 'Auto',
                           color: theme.colorScheme.primary,
-                          subtitle: 'State not reported',
+                          statusValue: actuatorStatus?.fanOn,
+                          reasonCode: actuatorStatus?.fanReasonCode,
                         ),
                         _ActuatorChip(
                           icon: Icons.grain,
                           label: 'Mist',
                           value: 'Auto',
                           color: theme.colorScheme.tertiary,
-                          subtitle: 'State not reported',
+                          statusValue: actuatorStatus?.mistOn,
+                          reasonCode: actuatorStatus?.mistReasonCode,
                         ),
                         _ActuatorChip(
                           icon: Icons.local_fire_department,
                           label: 'Heater',
                           value: 'Auto',
                           color: Colors.redAccent,
-                          subtitle: 'State not reported',
+                          statusValue: actuatorStatus?.heaterOn,
+                          reasonCode: actuatorStatus?.heaterReasonCode,
                         ),
                       ],
                     ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Note: Real-time relay ON/OFF states are not yet exposed by the device; showing configured modes where available.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
+                    if (actuatorStatus == null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'Note: Real-time relay states not available (older firmware or not connected).',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 );
               },
@@ -1125,6 +1203,8 @@ class _ActuatorChip extends StatelessWidget {
     required this.value,
     required this.color,
     this.subtitle,
+    this.statusValue,
+    this.reasonCode,
   });
 
   final IconData icon;
@@ -1132,10 +1212,32 @@ class _ActuatorChip extends StatelessWidget {
   final String value;
   final Color color;
   final String? subtitle;
+  final bool? statusValue; // null = not available, true = ON, false = OFF
+  final int? reasonCode; // Reason code for relay state (0-255)
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+
+    // Determine status display
+    String? statusText;
+    Color? statusColor;
+    String? reasonText;
+    if (statusValue != null) {
+      statusText = statusValue! ? 'ON' : 'OFF';
+      statusColor = statusValue! ? Colors.green : Colors.grey;
+
+      // Decode reason code if available
+      if (reasonCode != null && reasonCode! > 0) {
+        final reason = RelayReasonCode.fromCode(reasonCode!);
+        reasonText = reason.shortDisplay;
+        // Use reason color only for warnings
+        if (reason.isWarning) {
+          statusColor = Color(reason.displayColor);
+        }
+      }
+    }
+
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -1161,7 +1263,42 @@ class _ActuatorChip extends StatelessWidget {
                       fontWeight: FontWeight.bold,
                     ),
               ),
-              if (subtitle != null)
+              if (statusText != null)
+                Container(
+                  margin: const EdgeInsets.only(top: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: statusColor!.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: statusColor, width: 1.5),
+                  ),
+                  child: Text(
+                    statusText,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: statusColor,
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
+                ),
+              if (reasonText != null)
+                Container(
+                  margin: const EdgeInsets.only(top: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: cs.surfaceContainerHigh,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    reasonText,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: cs.onSurfaceVariant,
+                          fontSize: 10,
+                        ),
+                  ),
+                )
+              else if (statusText == null && subtitle != null)
                 Text(
                   subtitle!,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
