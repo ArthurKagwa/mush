@@ -1,4 +1,4 @@
 *.env
 .cursor/
 .vscode/
-.github/
+.github/*
